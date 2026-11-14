@@ -28,7 +28,7 @@ A solução será desenvolvida em torno de um **desafio realista de cidade intel
 
 | Definição | Descrição |
 |---|---|
-| **Eixo temático** | `[Definir: trânsito, saúde, educação, emprego e renda, esportes, cultura, ordem pública/manutenção ou turismo]` |
+| **Eixo temático** | **Turismo** |
 | **Problema central** | `[Descrever o problema urbano que será investigado]` |
 | **Público beneficiado** | `[Ex.: gestores públicos, moradores, equipes de planejamento]` |
 | **Dados utilizados** | `[Informar bases, fontes e períodos analisados]` |
