@@ -122,7 +122,7 @@ Estrutura **sugerida** para os artefatos do projeto, a ser criada conforme a nec
 |:--:|---|---|
 | 1 | `Vinicius Lacerda Santos` | `12725210686` |
 | 2 | `Rafael Pereira Grigorio de Lacerda` | `1272526033` |
-| 3 | `[Nome completo]` | `[RA]` |
+| 3 | `Fausto Bento Torres` | `1272521583 ` |
 | 4 | `[Nome completo]` | `[RA]` |
 | 5 | `[Nome completo]` | `[RA]` |
 
