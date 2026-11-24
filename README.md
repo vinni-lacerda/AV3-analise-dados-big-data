@@ -121,7 +121,7 @@ Estrutura **sugerida** para os artefatos do projeto, a ser criada conforme a nec
 | Integrante | Nome completo | RA |
 |:--:|---|---|
 | 1 | `Vinicius Lacerda Santos` | `12725210686` |
-| 2 | `[Nome completo]` | `[RA]` |
+| 2 | `Rafael Pereira Grigorio de Lacerda` | `1272526033` |
 | 3 | `[Nome completo]` | `[RA]` |
 | 4 | `[Nome completo]` | `[RA]` |
 | 5 | `[Nome completo]` | `[RA]` |
