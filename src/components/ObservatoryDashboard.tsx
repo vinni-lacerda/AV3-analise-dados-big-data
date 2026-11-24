@@ -572,7 +572,7 @@ export default function ObservatoryDashboard() {
               <Code2 className="h-4 w-4 text-amber-300" />
               Ver schema (21 colunas)
             </button>
-            
+
             <p className="flex items-start gap-2 pt-1 text-xs leading-relaxed text-teal-400">
               <Database className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               Dados mockados no schema oficial do Ministério do Turismo (CGDI/MTur).
