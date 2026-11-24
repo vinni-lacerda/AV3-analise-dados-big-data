@@ -23,6 +23,9 @@ CREATE TABLE atividades (
     act_codigo TEXT NOT NULL,
     cnae_classe TEXT NOT NULL,
     act_nome TEXT NOT NULL,
+    -- Nomes preenchidos a partir do catálogo CNAE do IBGE durante o ETL.
+    cnae_classe_nome TEXT,
+    cnae_subclasse_nome TEXT,
     PRIMARY KEY (cnae_subclasse, act_codigo)
 );
 
