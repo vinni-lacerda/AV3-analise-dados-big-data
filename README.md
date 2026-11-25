@@ -146,7 +146,7 @@ npm start
 | 1 | `Vinicius Lacerda Santos` | `12725210686` |
 | 2 | `Rafael Pereira Grigorio de Lacerda` | `1272526033` |
 | 3 | `Fausto Bento Torres` | `1272521583 ` |
-| 4 | `[Nome completo]` | `[RA]` |
+| 4 | `José Felipe Amorim Gerez` | `12725158186` |
 | 5 | `[Nome completo]` | `[RA]` |
 
 ## 🎓 Contexto acadêmico e entregas
