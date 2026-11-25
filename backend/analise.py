@@ -1,0 +1,472 @@
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+MESES_NOMES = {
+    1: "Janeiro",
+    2: "Fevereiro",
+    3: "Março",
+    4: "Abril",
+    5: "Maio",
+    6: "Junho",
+    7: "Julho",
+    8: "Agosto",
+    9: "Setembro",
+    10: "Outubro",
+    11: "Novembro",
+    12: "Dezembro",
+}
+
+
+def conectar(caminho_db: Path) -> sqlite3.Connection:
+    if not caminho_db.exists():
+        raise FileNotFoundError(f"Banco SQLite não encontrado: {caminho_db}")
+    conexao = sqlite3.connect(caminho_db)
+    conexao.row_factory = sqlite3.Row
+    return conexao
+
+
+def p1_cidades_mais_empregos(conexao: sqlite3.Connection, limite: int = 15) -> list[dict]:
+    consulta = """
+        SELECT
+            m.municipio_codigo,
+            m.municipio_nome,
+            m.uf_nome,
+            COUNT(*) AS total_empregos,
+            ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM empregos_turismo), 2) AS percentual_nacional
+        FROM empregos_turismo e
+        JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
+        GROUP BY m.municipio_codigo, m.municipio_nome, m.uf_nome
+        ORDER BY total_empregos DESC
+        LIMIT ?;
+    """
+    return [dict(linha) for linha in conexao.execute(consulta, (limite,)).fetchall()]
+
+
+def p2_meses_mais_admissoes_por_cidade(conexao: sqlite3.Connection, top_cidades: int = 10) -> list[dict]:
+    consulta = """
+        WITH top_municipios AS (
+            SELECT municipio_codigo
+            FROM empregos_turismo
+            GROUP BY municipio_codigo
+            ORDER BY COUNT(*) DESC
+            LIMIT ?
+        ),
+        admissoes_mes AS (
+            SELECT
+                e.municipio_codigo,
+                m.municipio_nome,
+                m.uf_nome,
+                e.mes_admissao,
+                COUNT(*) AS total_admissoes,
+                RANK() OVER (
+                    PARTITION BY e.municipio_codigo
+                    ORDER BY COUNT(*) DESC
+                ) AS posicao
+            FROM empregos_turismo e
+            JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
+            WHERE e.municipio_codigo IN (SELECT municipio_codigo FROM top_municipios)
+              AND e.mes_admissao IS NOT NULL
+            GROUP BY e.municipio_codigo, m.municipio_nome, m.uf_nome, e.mes_admissao
+        )
+        SELECT
+            municipio_codigo,
+            municipio_nome,
+            uf_nome,
+            mes_admissao,
+            total_admissoes,
+            posicao
+        FROM admissoes_mes
+        WHERE posicao <= 3
+        ORDER BY municipio_nome ASC, posicao ASC;
+    """
+    resultados = []
+    for linha in conexao.execute(consulta, (top_cidades,)).fetchall():
+        item = dict(linha)
+        item["mes_nome"] = MESES_NOMES.get(item["mes_admissao"], str(item["mes_admissao"]))
+        resultados.append(item)
+    return resultados
+
+
+def p3_cidades_maior_remuneracao(
+    conexao: sqlite3.Connection, minimo_vinculos: int = 500, limite: int = 15
+) -> list[dict]:
+    consulta = """
+        WITH remuneracoes_validas AS (
+            SELECT
+                e.municipio_codigo,
+                m.municipio_nome,
+                m.uf_nome,
+                e.remuneracao_dezembro_centavos / 100.0 AS remuneracao_reais,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.municipio_codigo
+                    ORDER BY e.remuneracao_dezembro_centavos
+                ) AS rn,
+                COUNT(*) OVER (PARTITION BY e.municipio_codigo) AS qtd_validos
+            FROM empregos_turismo e
+            JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
+            WHERE e.remuneracao_dezembro_centavos IS NOT NULL
+              AND e.remuneracao_dezembro_centavos > 0
+        )
+        SELECT
+            municipio_codigo,
+            municipio_nome,
+            uf_nome,
+            qtd_validos AS vinculos_remunerados_dezembro,
+            ROUND(AVG(remuneracao_reais), 2) AS remuneracao_media_reais,
+            ROUND(
+                AVG(
+                    CASE
+                        WHEN rn IN ((qtd_validos + 1) / 2, (qtd_validos + 2) / 2)
+                        THEN remuneracao_reais
+                    END
+                ),
+                2
+            ) AS remuneracao_mediana_reais,
+            ROUND(SUM(remuneracao_reais), 2) AS massa_salarial_dezembro_reais
+        FROM remuneracoes_validas
+        GROUP BY municipio_codigo, municipio_nome, uf_nome, qtd_validos
+        HAVING qtd_validos >= ?
+        ORDER BY remuneracao_mediana_reais DESC, remuneracao_media_reais DESC
+        LIMIT ?;
+    """
+    return [dict(linha) for linha in conexao.execute(consulta, (minimo_vinculos, limite)).fetchall()]
+
+
+def p4_cnaes_maior_remuneracao_mediana_dezembro(
+    conexao: sqlite3.Connection, minimo_vinculos: int = 100, limite: int = 15
+) -> list[dict]:
+    consulta = """
+        WITH remuneracoes_cnae AS (
+            SELECT
+                e.cnae_subclasse,
+                e.act_codigo,
+                COALESCE(a.cnae_subclasse_nome, a.act_nome) AS atividade_nome,
+                a.act_nome,
+                e.remuneracao_dezembro_centavos / 100.0 AS remuneracao_reais,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.cnae_subclasse, e.act_codigo
+                    ORDER BY e.remuneracao_dezembro_centavos
+                ) AS rn,
+                COUNT(*) OVER (PARTITION BY e.cnae_subclasse, e.act_codigo) AS qtd_validos
+            FROM empregos_turismo e
+            JOIN atividades a
+              ON a.cnae_subclasse = e.cnae_subclasse
+             AND a.act_codigo = e.act_codigo
+            WHERE e.remuneracao_dezembro_centavos IS NOT NULL
+              AND e.remuneracao_dezembro_centavos > 0
+        )
+        SELECT
+            cnae_subclasse,
+            act_codigo,
+            atividade_nome,
+            act_nome,
+            qtd_validos AS vinculos_remunerados_dezembro,
+            ROUND(
+                AVG(
+                    CASE
+                        WHEN rn IN ((qtd_validos + 1) / 2, (qtd_validos + 2) / 2)
+                        THEN remuneracao_reais
+                    END
+                ),
+                2
+            ) AS remuneracao_mediana_reais,
+            ROUND(AVG(remuneracao_reais), 2) AS remuneracao_media_reais
+        FROM remuneracoes_cnae
+        GROUP BY cnae_subclasse, act_codigo, atividade_nome, act_nome, qtd_validos
+        HAVING qtd_validos >= ?
+        ORDER BY remuneracao_mediana_reais DESC
+        LIMIT ?;
+    """
+    return [dict(linha) for linha in conexao.execute(consulta, (minimo_vinculos, limite)).fetchall()]
+
+
+def p5_priorizar_busca_trabalho(
+    conexao: sqlite3.Connection, minimo_admissoes_mes: int = 100, limite: int = 15
+) -> list[dict]:
+    consulta = """
+        WITH base_cidade_mes AS (
+            SELECT
+                e.municipio_codigo,
+                m.municipio_nome,
+                m.uf_nome,
+                e.mes_admissao,
+                COUNT(*) AS total_admissoes,
+                ROUND(
+                    AVG(
+                        CASE
+                            WHEN e.remuneracao_dezembro_centavos > 0
+                            THEN e.remuneracao_dezembro_centavos / 100.0
+                        END
+                    ),
+                    2
+                ) AS remuneracao_media_reais
+            FROM empregos_turismo e
+            JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
+            WHERE e.mes_admissao IS NOT NULL
+            GROUP BY e.municipio_codigo, m.municipio_nome, m.uf_nome, e.mes_admissao
+            HAVING COUNT(*) >= ?
+        ),
+        limites AS (
+            SELECT
+                MAX(total_admissoes) AS max_adm,
+                MAX(remuneracao_media_reais) AS max_rem
+            FROM base_cidade_mes
+        )
+        SELECT
+            b.municipio_codigo,
+            b.municipio_nome,
+            b.uf_nome,
+            b.mes_admissao,
+            b.total_admissoes,
+            b.remuneracao_media_reais,
+            ROUND(
+                (
+                    (b.total_admissoes * 1.0 / NULLIF(l.max_adm, 0)) * 0.5 +
+                    (COALESCE(b.remuneracao_media_reais, 0) * 1.0 / NULLIF(l.max_rem, 0)) * 0.5
+                ) * 100,
+                2
+            ) AS indice_oportunidade
+        FROM base_cidade_mes b
+        CROSS JOIN limites l
+        ORDER BY indice_oportunidade DESC
+        LIMIT ?;
+    """
+    resultados = []
+    for linha in conexao.execute(consulta, (minimo_admissoes_mes, limite)).fetchall():
+        item = dict(linha)
+        item["mes_nome"] = MESES_NOMES.get(item["mes_admissao"], str(item["mes_admissao"]))
+        resultados.append(item)
+    return resultados
+
+
+def p6_cidades_por_cnae(conexao: sqlite3.Connection, top_cnaes: int = 10) -> list[dict]:
+    consulta = """
+        WITH top_atividades AS (
+            SELECT cnae_subclasse, act_codigo
+            FROM empregos_turismo
+            GROUP BY cnae_subclasse, act_codigo
+            ORDER BY COUNT(*) DESC
+            LIMIT ?
+        ),
+        contagem AS (
+            SELECT
+                e.cnae_subclasse,
+                e.act_codigo,
+                COALESCE(a.cnae_subclasse_nome, a.act_nome) AS atividade_nome,
+                m.municipio_nome,
+                m.uf_nome,
+                COUNT(*) AS total_empregos,
+                RANK() OVER (
+                    PARTITION BY e.cnae_subclasse, e.act_codigo
+                    ORDER BY COUNT(*) DESC
+                ) AS posicao
+            FROM empregos_turismo e
+            JOIN atividades a
+              ON a.cnae_subclasse = e.cnae_subclasse
+             AND a.act_codigo = e.act_codigo
+            JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
+            WHERE (e.cnae_subclasse, e.act_codigo) IN (
+                SELECT cnae_subclasse, act_codigo FROM top_atividades
+            )
+            GROUP BY e.cnae_subclasse, e.act_codigo, atividade_nome, m.municipio_nome, m.uf_nome
+        )
+        SELECT
+            cnae_subclasse,
+            act_codigo,
+            atividade_nome,
+            municipio_nome,
+            uf_nome,
+            total_empregos,
+            posicao
+        FROM contagem
+        WHERE posicao <= 3
+        ORDER BY cnae_subclasse ASC, posicao ASC;
+    """
+    return [dict(linha) for linha in conexao.execute(consulta, (top_cnaes,)).fetchall()]
+
+
+def p7_participacao_mulheres(
+    conexao: sqlite3.Connection, minimo_vinculos: int = 200, limite: int = 15
+) -> dict[str, list[dict]]:
+    por_cidade = """
+        SELECT
+            m.municipio_codigo,
+            m.municipio_nome,
+            m.uf_nome,
+            COUNT(*) AS total_empregos,
+            SUM(CASE WHEN LOWER(e.sexo) = 'feminino' THEN 1 ELSE 0 END) AS total_mulheres,
+            ROUND(
+                SUM(CASE WHEN LOWER(e.sexo) = 'feminino' THEN 1 ELSE 0 END) * 100.0
+                / NULLIF(COUNT(*), 0),
+                2
+            ) AS percentual_mulheres
+        FROM empregos_turismo e
+        JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
+        WHERE e.sexo IS NOT NULL
+        GROUP BY m.municipio_codigo, m.municipio_nome, m.uf_nome
+        HAVING COUNT(*) >= ?
+        ORDER BY total_empregos DESC
+        LIMIT ?;
+    """
+    por_cnae = """
+        SELECT
+            e.cnae_subclasse,
+            e.act_codigo,
+            COALESCE(a.cnae_subclasse_nome, a.act_nome) AS atividade_nome,
+            COUNT(*) AS total_empregos,
+            SUM(CASE WHEN LOWER(e.sexo) = 'feminino' THEN 1 ELSE 0 END) AS total_mulheres,
+            ROUND(
+                SUM(CASE WHEN LOWER(e.sexo) = 'feminino' THEN 1 ELSE 0 END) * 100.0
+                / NULLIF(COUNT(*), 0),
+                2
+            ) AS percentual_mulheres
+        FROM empregos_turismo e
+        JOIN atividades a
+          ON a.cnae_subclasse = e.cnae_subclasse
+         AND a.act_codigo = e.act_codigo
+        WHERE e.sexo IS NOT NULL
+        GROUP BY e.cnae_subclasse, e.act_codigo, atividade_nome
+        HAVING COUNT(*) >= ?
+        ORDER BY total_empregos DESC
+        LIMIT ?;
+    """
+    return {
+        "por_cidade": [dict(r) for r in conexao.execute(por_cidade, (minimo_vinculos, limite)).fetchall()],
+        "por_atividade": [dict(r) for r in conexao.execute(por_cnae, (minimo_vinculos, limite)).fetchall()],
+    }
+
+
+def p8_escolaridade_mais_comum(conexao: sqlite3.Connection, limite: int = 15) -> dict[str, list[dict]]:
+    por_cidade = """
+        WITH contagem AS (
+            SELECT
+                m.municipio_codigo,
+                m.municipio_nome,
+                m.uf_nome,
+                e.escolaridade,
+                COUNT(*) AS total_trabalhadores,
+                SUM(COUNT(*)) OVER (PARTITION BY m.municipio_codigo) AS total_cidade,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.municipio_codigo
+                    ORDER BY COUNT(*) DESC
+                ) AS rn
+            FROM empregos_turismo e
+            JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
+            WHERE e.escolaridade IS NOT NULL
+            GROUP BY m.municipio_codigo, m.municipio_nome, m.uf_nome, e.escolaridade
+        )
+        SELECT
+            municipio_codigo,
+            municipio_nome,
+            uf_nome,
+            escolaridade AS escolaridade_mais_comum,
+            total_trabalhadores,
+            total_cidade,
+            ROUND(total_trabalhadores * 100.0 / NULLIF(total_cidade, 0), 2) AS percentual_na_cidade
+        FROM contagem
+        WHERE rn = 1
+        ORDER BY total_cidade DESC
+        LIMIT ?;
+    """
+    por_cnae = """
+        WITH contagem AS (
+            SELECT
+                e.cnae_subclasse,
+                e.act_codigo,
+                COALESCE(a.cnae_subclasse_nome, a.act_nome) AS atividade_nome,
+                e.escolaridade,
+                COUNT(*) AS total_trabalhadores,
+                SUM(COUNT(*)) OVER (PARTITION BY e.cnae_subclasse, e.act_codigo) AS total_atividade,
+                ROW_NUMBER() OVER (
+                    PARTITION BY e.cnae_subclasse, e.act_codigo
+                    ORDER BY COUNT(*) DESC
+                ) AS rn
+            FROM empregos_turismo e
+            JOIN atividades a
+              ON a.cnae_subclasse = e.cnae_subclasse
+             AND a.act_codigo = e.act_codigo
+            WHERE e.escolaridade IS NOT NULL
+            GROUP BY e.cnae_subclasse, e.act_codigo, atividade_nome, e.escolaridade
+        )
+        SELECT
+            cnae_subclasse,
+            act_codigo,
+            atividade_nome,
+            escolaridade AS escolaridade_mais_comum,
+            total_trabalhadores,
+            total_atividade,
+            ROUND(total_trabalhadores * 100.0 / NULLIF(total_atividade, 0), 2) AS percentual_na_atividade
+        FROM contagem
+        WHERE rn = 1
+        ORDER BY total_atividade DESC
+        LIMIT ?;
+    """
+    return {
+        "por_cidade": [dict(r) for r in conexao.execute(por_cidade, (limite,)).fetchall()],
+        "por_atividade": [dict(r) for r in conexao.execute(por_cnae, (limite,)).fetchall()],
+    }
+
+
+def validar_consistencia_totais(conexao: sqlite3.Connection) -> dict:
+    total_geral = conexao.execute("SELECT COUNT(*) FROM empregos_turismo;").fetchone()[0]
+    soma_por_uf = conexao.execute(
+        """
+        SELECT COALESCE(SUM(qtd), 0)
+        FROM (
+            SELECT COUNT(*) AS qtd
+            FROM empregos_turismo e
+            JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
+            GROUP BY m.uf_codigo
+        );
+        """
+    ).fetchone()[0]
+    soma_por_act = conexao.execute(
+        """
+        SELECT COALESCE(SUM(qtd), 0)
+        FROM (
+            SELECT COUNT(*) AS qtd
+            FROM empregos_turismo
+            GROUP BY act_codigo
+        );
+        """
+    ).fetchone()[0]
+    return {
+        "total_geral_registros": total_geral,
+        "soma_recorte_uf": soma_por_uf,
+        "soma_recorte_act": soma_por_act,
+        "consistente": total_geral == soma_por_uf == soma_por_act,
+    }
+
+
+def gerar_relatorio_completo(caminho_db: Path) -> dict:
+    conexao = conectar(caminho_db)
+    try:
+        return {
+            "validacao_integridade": validar_consistencia_totais(conexao),
+            "p1_cidades_mais_empregos": p1_cidades_mais_empregos(conexao),
+            "p2_meses_mais_admissoes_por_cidade": p2_meses_mais_admissoes_por_cidade(conexao),
+            "p3_cidades_maior_remuneracao": p3_cidades_maior_remuneracao(conexao),
+            "p4_cnaes_maior_remuneracao_mediana_dezembro": p4_cnaes_maior_remuneracao_mediana_dezembro(conexao),
+            "p5_priorizar_busca_trabalho": p5_priorizar_busca_trabalho(conexao),
+            "p6_cidades_por_cnae": p6_cidades_por_cnae(conexao),
+            "p7_participacao_mulheres": p7_participacao_mulheres(conexao),
+            "p8_escolaridade_mais_comum": p8_escolaridade_mais_comum(conexao),
+        }
+    finally:
+        conexao.close()
+
+
+if __name__ == "__main__":
+    raiz_projeto = Path(__file__).resolve().parent.parent
+    caminho_db_padrao = Path(sys.argv[1]) if len(sys.argv) > 1 else raiz_projeto / "dados" / "turismo.db"
+    caminho_saida_json = raiz_projeto / "docs" / "indicadores_turismo_2025.json"
+
+    relatorio = gerar_relatorio_completo(caminho_db_padrao)
+    caminho_saida_json.parent.mkdir(parents=True, exist_ok=True)
+    caminho_saida_json.write_text(json.dumps(relatorio, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("=== VALIDAÇÃO DE TOTAIS ===")
+    print(json.dumps(relatorio["validacao_integridade"], ensure_ascii=False, indent=2))
+    print(f"\nRelatório completo salvo em: {caminho_saida_json}")
