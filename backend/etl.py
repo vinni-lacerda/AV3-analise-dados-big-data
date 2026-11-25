@@ -384,7 +384,7 @@ def executar_etl(caminho_csv: Path, caminho_db: Path, caminho_schema: Path) -> N
         t_municipios = metadata.tables["municipios"]
         t_atividades = metadata.tables["atividades"]
         t_empregos = metadata.tables["empregos_turismo"]
-    
+
         with engine.connect() as conexao:
             ja_importado = conexao.execute(
                 select(t_arquivos.c.arquivo_id, t_arquivos.c.nome_arquivo).where(
