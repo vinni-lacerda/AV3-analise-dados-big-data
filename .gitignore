@@ -1,2 +1,21 @@
+# Dados e Base de Dados
 *.csv
 *.db
+
+# Ambiente Virtual (uv / Python)
+.venv/
+venv/
+env/
+
+# Cache e Build do Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editores e Sistema Operacional
+.vscode/
+.idea/
