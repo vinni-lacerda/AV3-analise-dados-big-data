@@ -10,6 +10,7 @@ import {
   ACTS_OFICIAIS, SCHEMA_COLUMNS, MESES_NOMES, MOCK_TOURISM_DATA, INITIAL_QUESTIONS,
   formatCurrency, formatNumber
 } from '../data/raisTourism';
+import ForecastSection from './ForecastSection';
 
 /* ------------------------------------------------------------------ */
 /* Design tokens                                                       */
@@ -52,7 +53,7 @@ function SectionTitle({ title, hint, right }: { title: string; hint?: string; ri
 
 export default function ObservatoryDashboard() {
   // Navegação principal
-  const [activeTab, setActiveTab] = useState('explorer'); // 'explorer' | 'qa'
+  const [activeTab, setActiveTab] = useState('explorer'); // 'explorer' | 'qa' | 'forecast'
   const [showFilters, setShowFilters] = useState(false); // só layout (mobile)
 
   // Estados de Filtro
@@ -566,6 +567,11 @@ export default function ObservatoryDashboard() {
                 {answeredCount}/{INITIAL_QUESTIONS.length}
               </span>
             </button>
+            <button
+              onClick={() => setActiveTab('forecast')}
+              className={navBtn(activeTab === 'forecast')}>
+              <BarChart3 className="h-4 w-4" /> Previsão sazonal
+            </button>
           </nav>
 
           {/* Filtros */}
@@ -715,7 +721,7 @@ export default function ObservatoryDashboard() {
               </div>
             </div>
           </section>
-
+          {activeTab === 'forecast' && <ForecastSection />}
           {/* ============================================================ */}
           {/* ABA 1: EXPLORADOR                                             */}
           {/* ============================================================ */}
