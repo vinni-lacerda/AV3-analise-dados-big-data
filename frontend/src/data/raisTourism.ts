@@ -376,13 +376,13 @@ export const MOCK_TOURISM_DATA = [
 ];
 
 // ============================================================================
-// 3. ESTRUTURA INICIAL DAS 6 PERGUNTAS DE PESQUISA (BIG DATA Q&A)
+// 3. ESTRUTURA INICIAL DAS PERGUNTAS DE PESQUISA (BIG DATA Q&A)
 // ============================================================================
 export const INITIAL_QUESTIONS = [
   {
     id: 'q1',
     number: 1,
-    title: 'Quais cidades têm mais empregos de turismo?',
+    title: 'Quais cidades concentram mais empregos no turismo?',
     tag: 'Volumetria Geográfica',
     methodology: 'Agrupamento (GROUP BY Municipio, UF) com contagem de vínculos ativos (COUNT(Id)) ordenada decrescentemente.',
     defaultAnswer: '',
@@ -391,47 +391,65 @@ export const INITIAL_QUESTIONS = [
   {
     id: 'q2',
     number: 2,
-    title: 'Quais meses é contratado mais gente?',
+    title: 'Em quais meses houve mais admissões em cada cidade?',
     tag: 'Análise de Sazonalidade',
-    methodology: 'Distribuição temporal filtrando admissões ocorridas em 2025 (Mes_Admissao BETWEEN 1 AND 12) para identificar picos sazonais.',
+    methodology: 'Contagem das admissões por município e mês, considerando apenas admissões ocorridas em 2025 (Mes_Admissao entre 1 e 12), para identificar os períodos de maior contratação em cada cidade.',
     defaultAnswer: '',
-    defaultQuery: 'SELECT Mes_Admissao, COUNT(Id) AS Novas_Admissoes FROM rais_turismo_2025 WHERE Mes_Admissao > 0 GROUP BY Mes_Admissao ORDER BY Novas_Admissoes DESC;'
+    defaultQuery: 'SELECT Municipio, UF, Mes_Admissao, COUNT(Id) AS Novas_Admissoes FROM rais_turismo_2025 WHERE Mes_Admissao BETWEEN 1 AND 12 GROUP BY Municipio, UF, Mes_Admissao ORDER BY Municipio, UF, Novas_Admissoes DESC;'
   },
   {
     id: 'q3',
     number: 3,
-    title: 'Qual cidade dá mais dinheiro no turismo?',
-    tag: 'Renda & Massa Salarial',
-    methodology: 'Cálculo da remuneração média (AVG(Remuneracao_Dezembro)) e mediana salarial por município, controlando por carga horária.',
+    title: 'Qual cidade apresenta a maior remuneração média no turismo, considerando os vínculos do ano?',
+    tag: 'Remuneração por Cidade',
+    methodology: 'Comparação da remuneração média de dezembro dos vínculos ativos em cada município. A base contém remuneração de dezembro, não remuneração acumulada ao longo do ano.',
     defaultAnswer: '',
-    defaultQuery: 'SELECT Municipio, UF, ROUND(AVG(Remuneracao_Dezembro), 2) AS Media_Salarial, SUM(Remuneracao_Dezembro) AS Massa_Salarial FROM rais_turismo_2025 GROUP BY Municipio, UF HAVING COUNT(Id) >= 50 ORDER BY Media_Salarial DESC;'
+    defaultQuery: 'SELECT Municipio, UF, ROUND(AVG(Remuneracao_Dezembro), 2) AS Remuneracao_Media_Dezembro FROM rais_turismo_2025 GROUP BY Municipio, UF ORDER BY Remuneracao_Media_Dezembro DESC;'
   },
   {
     id: 'q4',
     number: 4,
-    title: 'Qual CNAE tem mais remuneração?',
-    tag: 'Especialização Setorial',
-    methodology: 'Agregação por CNAE_2.0_Subclasse e ACT comparando média salarial em Dezembro e horas contratadas.',
+    title: 'Quais atividades econômicas (CNAEs) tiveram a maior remuneração mediana em dezembro?',
+    tag: 'Mediana Salarial por CNAE',
+    methodology: 'Cálculo da mediana da remuneração de dezembro por CNAE, usando o percentil 50 para reduzir a influência de valores extremos, e ordenação das atividades da maior para a menor mediana.',
     defaultAnswer: '',
-    defaultQuery: 'SELECT `CNAE_2.0_Subclasse`, ACT, ROUND(AVG(Remuneracao_Dezembro), 2) AS Remuneracao_Media FROM rais_turismo_2025 GROUP BY `CNAE_2.0_Subclasse`, ACT ORDER BY Remuneracao_Media DESC LIMIT 10;'
+    defaultQuery: 'SELECT `CNAE_2.0_Subclasse`, ACT, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY Remuneracao_Dezembro) AS Remuneracao_Mediana_Dezembro FROM rais_turismo_2025 GROUP BY `CNAE_2.0_Subclasse`, ACT ORDER BY Remuneracao_Mediana_Dezembro DESC LIMIT 10;'
   },
   {
     id: 'q5',
     number: 5,
-    title: 'Quais cidades valem a pena se mudar para conseguir um dinheiro em algum mês no turismo?',
+    title: 'Em quais cidades e meses vale priorizar a busca por trabalho, considerando admissões e remuneração?',
     tag: 'Índice de Oportunidade Sazonal',
-    methodology: 'Cruzamento entre volume de admissões sazonais (Mes_Admissao) + remuneração média acima da média nacional por município.',
+    methodology: 'Comparação do volume de admissões e da remuneração média de dezembro por cidade e mês, priorizando primeiro os grupos com mais admissões e, em caso de empate, a maior remuneração média.',
     defaultAnswer: '',
-    defaultQuery: 'SELECT Municipio, UF, Mes_Admissao, COUNT(Id) AS Vagas_Mes, ROUND(AVG(Remuneracao_Dezembro), 2) AS Media_Salarial FROM rais_turismo_2025 WHERE Mes_Admissao IN (10, 11, 12, 1, 6, 7) GROUP BY Municipio, UF, Mes_Admissao ORDER BY Vagas_Mes DESC, Media_Salarial DESC;'
+    defaultQuery: 'SELECT Municipio, UF, Mes_Admissao, COUNT(Id) AS Total_Admissoes, ROUND(AVG(Remuneracao_Dezembro), 2) AS Remuneracao_Media_Dezembro FROM rais_turismo_2025 WHERE Mes_Admissao BETWEEN 1 AND 12 GROUP BY Municipio, UF, Mes_Admissao ORDER BY Total_Admissoes DESC, Remuneracao_Media_Dezembro DESC;'
   },
   {
     id: 'q6',
     number: 6,
-    title: 'Qual CNAE tem mais emprego a partir de cada CNAE?',
-    tag: 'Hierarquia CNAE & ACT',
-    methodology: 'Análise hierárquica comparando o volume de empregos entre Classes CNAE 2.0 (4 dígitos) e suas respectivas Subclasses (7 dígitos) dentro de cada ACT.',
+    title: 'Para cada CNAE, quais cidades concentram mais registros de emprego?',
+    tag: 'Distribuição Geográfica por CNAE',
+    methodology: 'Contagem de vínculos por subclasse CNAE e município, com classificação das cidades de cada CNAE pela quantidade de registros de emprego.',
     defaultAnswer: '',
-    defaultQuery: 'SELECT ACT, `CNAE_2.0_Classe`, `CNAE_2.0_Subclasse`, COUNT(Id) AS Vinculos, ROUND(COUNT(Id) * 100.0 / SUM(COUNT(Id)) OVER(PARTITION BY ACT), 2) AS Share_ACT_Pct FROM rais_turismo_2025 GROUP BY ACT, `CNAE_2.0_Classe`, `CNAE_2.0_Subclasse` ORDER BY ACT, Vinculos DESC;'
+    defaultQuery: 'WITH VinculosPorCNAEECidade AS (SELECT `CNAE_2.0_Classe`, `CNAE_2.0_Subclasse`, Municipio, UF, COUNT(Id) AS Total_Vinculos FROM rais_turismo_2025 GROUP BY `CNAE_2.0_Classe`, `CNAE_2.0_Subclasse`, Municipio, UF), RankingCidades AS (SELECT *, ROW_NUMBER() OVER (PARTITION BY `CNAE_2.0_Subclasse` ORDER BY Total_Vinculos DESC, Municipio, UF) AS Posicao FROM VinculosPorCNAEECidade) SELECT `CNAE_2.0_Classe`, `CNAE_2.0_Subclasse`, Municipio, UF, Total_Vinculos FROM RankingCidades WHERE Posicao = 1 ORDER BY `CNAE_2.0_Subclasse`;'
+  },
+  {
+    id: 'q7',
+    number: 7,
+    title: 'Qual é a participação das mulheres no emprego em turismo, por cidade e atividade econômica?',
+    tag: 'Participação das Mulheres',
+    methodology: 'Agrupamento por município e Atividade Característica do Turismo (ACT), comparando vínculos ocupados por mulheres com o total de vínculos para calcular a participação percentual.',
+    defaultAnswer: '',
+    defaultQuery: "SELECT Municipio, UF, ACT, COUNT(Id) AS Total_Vinculos, SUM(CASE WHEN Sexo = 'Feminino' THEN 1 ELSE 0 END) AS Vinculos_Mulheres, ROUND(100.0 * SUM(CASE WHEN Sexo = 'Feminino' THEN 1 ELSE 0 END) / NULLIF(COUNT(Id), 0), 2) AS Participacao_Mulheres_Pct FROM rais_turismo_2025 GROUP BY Municipio, UF, ACT ORDER BY Total_Vinculos DESC;"
+  },
+  {
+    id: 'q8',
+    number: 8,
+    title: 'Qual é o nível de escolaridade mais comum entre os trabalhadores do turismo, por cidade e atividade econômica?',
+    tag: 'Escolaridade por Atividade',
+    methodology: 'Contagem de vínculos por nível de escolaridade, agrupada por município e Atividade Característica do Turismo (ACT); o nível com maior frequência em cada grupo é identificado como o mais comum.',
+    defaultAnswer: '',
+    defaultQuery: 'WITH EscolaridadePorGrupo AS (SELECT Municipio, UF, ACT, Escolaridade_Rotulo, COUNT(Id) AS Total_Vinculos, ROW_NUMBER() OVER (PARTITION BY Municipio, UF, ACT ORDER BY COUNT(Id) DESC, Escolaridade_Rotulo) AS Posicao FROM rais_turismo_2025 GROUP BY Municipio, UF, ACT, Escolaridade_Rotulo) SELECT Municipio, UF, ACT, Escolaridade_Rotulo AS Escolaridade_Mais_Comum, Total_Vinculos FROM EscolaridadePorGrupo WHERE Posicao = 1 ORDER BY Municipio, UF, ACT;'
   }
 ];
 

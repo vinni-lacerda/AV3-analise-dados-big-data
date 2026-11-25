@@ -72,7 +72,7 @@ export default function ObservatoryDashboard() {
   const [selectedRow, setSelectedRow] = useState<any>(null);
   const [showSchemaModal, setShowSchemaModal] = useState(false);
 
-  // Estados das 6 Perguntas (Persistência em localStorage)
+  // Estados das perguntas (Persistência em localStorage)
   type QaNote = {
     answer: string;
     query: string;
@@ -84,7 +84,25 @@ export default function ObservatoryDashboard() {
     try {
       if (typeof window !== 'undefined') {
         const saved = window.localStorage.getItem('turismo_rais_2025_qa');
-        if (saved) return JSON.parse(saved);
+        if (saved) {
+          const storedNotes = JSON.parse(saved);
+          const notes: Record<string, QaNote> = {};
+          INITIAL_QUESTIONS.forEach((question: any) => {
+            const storedNote = storedNotes[question.id];
+            notes[question.id] = storedNote
+              ? {
+                  ...storedNote,
+                  query: storedNote.updatedAt ? storedNote.query : question.defaultQuery
+                }
+              : {
+                  answer: question.defaultAnswer,
+                  query: question.defaultQuery,
+                  status: 'pending',
+                  updatedAt: null
+                };
+          });
+          return notes;
+        }
       }
     } catch (e) {
       console.error('Erro ao ler localStorage:', e);
@@ -105,7 +123,7 @@ export default function ObservatoryDashboard() {
   const [draftAnswer, setDraftAnswer] = useState('');
   const [draftQuery, setDraftQuery] = useState('');
   const [expandedQuestionIds, setExpandedQuestionIds] = useState<Record<string, boolean>>({
-    q1: true, q2: true, q3: false, q4: false, q5: false, q6: false
+    q1: true, q2: true, q3: false, q4: false, q5: false, q6: false, q7: false, q8: false
   });
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -238,7 +256,7 @@ export default function ObservatoryDashboard() {
     return { actList, monthsList };
   }, [filteredData]);
 
-  // Insights dinâmicos pré-calculados para as 6 perguntas (prova de conceito na base mockada)
+  // Insights dinâmicos pré-calculados para as perguntas (prova de conceito na base mockada)
   const dynamicQuestionPreviews = useMemo(() => {
     const data = MOCK_TOURISM_DATA as any[];
 
@@ -254,12 +272,17 @@ export default function ObservatoryDashboard() {
     });
     const topCitiesByJobs = Object.values(cityMap).sort((a, b) => b.count - a.count).slice(0, 4);
 
-    const monthMap: Record<number, number> = {};
+    const cityMonthMap: Record<string, { city: string; month: number; count: number }> = {};
     data.forEach((r) => {
-      if (r.Mes_Admissao > 0) monthMap[r.Mes_Admissao] = (monthMap[r.Mes_Admissao] || 0) + 1;
+      if (r.Mes_Admissao > 0) {
+        const city = `${r.Municipio} - ${r.UF}`;
+        const key = `${city}|${r.Mes_Admissao}`;
+        if (!cityMonthMap[key]) cityMonthMap[key] = { city, month: r.Mes_Admissao, count: 0 };
+        cityMonthMap[key].count += 1;
+      }
     });
-    const topMonths = Object.entries(monthMap)
-      .map(([m, c]) => ({ mes: MESES_NOMES[Number(m)], count: c }))
+    const topCityMonths = Object.values(cityMonthMap)
+      .map((item) => ({ ...item, monthName: MESES_NOMES[item.month] }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 4);
 
@@ -268,18 +291,24 @@ export default function ObservatoryDashboard() {
       .sort((a, b) => b.avgSal - a.avgSal)
       .slice(0, 4);
 
-    const cnaeMap: Record<string, { subclasse: string; classe: string; act: string; count: number; sumSal: number }> = {};
+    const cnaeMap: Record<string, { subclasse: string; classe: string; act: string; salaries: number[] }> = {};
     data.forEach((r) => {
       const k = r['CNAE_2.0_Subclasse'];
       if (!cnaeMap[k]) {
-        cnaeMap[k] = { subclasse: k, classe: r['CNAE_2.0_Classe'], act: r.ACT, count: 0, sumSal: 0 };
+        cnaeMap[k] = { subclasse: k, classe: r['CNAE_2.0_Classe'], act: r.ACT, salaries: [] };
       }
-      cnaeMap[k].count += 1;
-      cnaeMap[k].sumSal += r.Remuneracao_Dezembro;
+      cnaeMap[k].salaries.push(r.Remuneracao_Dezembro);
     });
     const topCnaeBySalary = Object.values(cnaeMap)
-      .map((c) => ({ ...c, avgSal: c.sumSal / c.count }))
-      .sort((a, b) => b.avgSal - a.avgSal)
+      .map((c) => {
+        const sortedSalaries = [...c.salaries].sort((a, b) => a - b);
+        const middle = Math.floor(sortedSalaries.length / 2);
+        const medianSalary = sortedSalaries.length % 2
+          ? sortedSalaries[middle]
+          : (sortedSalaries[middle - 1] + sortedSalaries[middle]) / 2;
+        return { ...c, medianSalary };
+      })
+      .sort((a, b) => b.medianSalary - a.medianSalary)
       .slice(0, 4);
 
     const cityMonthPairs: Record<string, { city: string; mes: string; count: number; sumSal: number }> = {};
@@ -294,22 +323,71 @@ export default function ObservatoryDashboard() {
       }
     });
     const bestRelocation = Object.values(cityMonthPairs)
-      .map((item) => ({ ...item, avgSal: item.sumSal / item.count, score: item.count * (item.sumSal / item.count) }))
-      .sort((a, b) => b.score - a.score)
+      .map((item) => ({ ...item, avgSal: item.sumSal / item.count }))
+      .sort((a, b) => b.count - a.count || b.avgSal - a.avgSal)
       .slice(0, 4);
 
-    const actTopCnae = ACTS_OFICIAIS.map((act: string) => {
-      const filteredAct = Object.values(cnaeMap).filter((c) => c.act === act);
-      const top = filteredAct.sort((a, b) => b.count - a.count)[0];
-      return {
-        act,
-        topSubclasse: top ? top.subclasse : 'Sem registros na amostra',
-        classe: top ? top.classe : '—',
-        count: top ? top.count : 0
-      };
+    const cnaeCityMap: Record<string, { cnae: string; city: string; count: number }> = {};
+    data.forEach((r) => {
+      const cnae = r['CNAE_2.0_Subclasse'];
+      const city = `${r.Municipio} (${r.UF})`;
+      const key = `${cnae}|${city}`;
+      if (!cnaeCityMap[key]) cnaeCityMap[key] = { cnae, city, count: 0 };
+      cnaeCityMap[key].count += 1;
+    });
+    const topCityByCnae: Record<string, { cnae: string; city: string; count: number }> = {};
+    Object.values(cnaeCityMap)
+      .sort((a, b) => a.cnae.localeCompare(b.cnae) || b.count - a.count || a.city.localeCompare(b.city, 'pt-BR'))
+      .forEach((item) => {
+        if (!topCityByCnae[item.cnae]) topCityByCnae[item.cnae] = item;
+      });
+    const topCnaeCities = Object.values(topCityByCnae)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 4);
+
+    const cityActGroups: Record<string, {
+      city: string;
+      act: string;
+      count: number;
+      women: number;
+      educationCounts: Record<string, number>;
+    }> = {};
+    data.forEach((r) => {
+      const city = `${r.Municipio} (${r.UF})`;
+      const key = `${city}|${r.ACT}`;
+      if (!cityActGroups[key]) {
+        cityActGroups[key] = { city, act: r.ACT, count: 0, women: 0, educationCounts: {} };
+      }
+      const group = cityActGroups[key];
+      group.count += 1;
+      if (r.Sexo === 'Feminino') group.women += 1;
+      group.educationCounts[r.Escolaridade_Rotulo] = (group.educationCounts[r.Escolaridade_Rotulo] || 0) + 1;
     });
 
-    return { q1: topCitiesByJobs, q2: topMonths, q3: topCitiesByMoney, q4: topCnaeBySalary, q5: bestRelocation, q6: actTopCnae };
+    const cityActGroupList = Object.values(cityActGroups);
+    const womenParticipation = cityActGroupList
+      .map((group) => ({ ...group, share: (group.women / group.count) * 100 }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 4);
+    const mostCommonEducation = cityActGroupList
+      .map((group) => {
+        const [education, educationCount] = Object.entries(group.educationCounts)
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], 'pt-BR'))[0];
+        return { ...group, education, educationCount };
+      })
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 4);
+
+    return {
+      q1: topCitiesByJobs,
+      q2: topCityMonths,
+      q3: topCitiesByMoney,
+      q4: topCnaeBySalary,
+      q5: bestRelocation,
+      q6: topCnaeCities,
+      q7: womenParticipation,
+      q8: mostCommonEducation
+    };
   }, []);
 
   // Linhas genéricas para o preview de cada pergunta (mesmos dados, mesma lógica)
@@ -317,14 +395,24 @@ export default function ObservatoryDashboard() {
     const p: any = dynamicQuestionPreviews;
     switch (id) {
       case 'q1': return p.q1.map((i: any) => ({ key: i.label, label: i.label, value: `${i.count} vínculos` }));
-      case 'q2': return p.q2.map((i: any) => ({ key: i.mes, label: i.mes, value: `${i.count} admissões` }));
+      case 'q2': return p.q2.map((i: any) => ({
+        key: `${i.city}-${i.month}`, label: i.city, sub: i.monthName, value: `${i.count} admissões`
+      }));
       case 'q3': return p.q3.map((i: any) => ({ key: i.label, label: i.label, sub: `${i.count} reg.`, value: formatCurrency(i.avgSal) }));
-      case 'q4': return p.q4.map((i: any) => ({ key: i.subclasse, label: i.subclasse, sub: i.act, value: formatCurrency(i.avgSal) }));
+      case 'q4': return p.q4.map((i: any) => ({ key: i.subclasse, label: i.subclasse, sub: i.act, value: formatCurrency(i.medianSalary) }));
       case 'q5': return p.q5.map((i: any) => ({
         key: `${i.city}-${i.mes}`, label: i.city, sub: `Mês: ${i.mes}`, value: formatCurrency(i.avgSal), note: `${i.count} contratações`
       }));
       case 'q6': return p.q6.map((i: any) => ({
-        key: i.act, label: i.act, sub: `Líder: ${i.topSubclasse}`, value: `Classe ${i.classe}`, note: `${i.count} reg.`
+        key: `${i.cnae}-${i.city}`, label: i.cnae, sub: i.city, value: `${i.count} vínculos`
+      }));
+      case 'q7': return p.q7.map((i: any) => ({
+        key: `${i.city}-${i.act}`, label: i.city, sub: i.act,
+        value: `${i.share.toFixed(1)}% mulheres`, note: `${i.women} de ${i.count} vínculos`
+      }));
+      case 'q8': return p.q8.map((i: any) => ({
+        key: `${i.city}-${i.act}`, label: i.city, sub: i.act,
+        value: i.education, note: `${i.educationCount} de ${i.count} vínculos`
       }));
       default: return [];
     }
@@ -475,7 +563,7 @@ export default function ObservatoryDashboard() {
                   activeTab === 'qa' ? 'bg-teal-950 text-amber-300' : 'bg-teal-800 text-teal-100'
                 }`}
               >
-                {answeredCount}/6
+                {answeredCount}/{INITIAL_QUESTIONS.length}
               </span>
             </button>
           </nav>
@@ -649,7 +737,7 @@ export default function ObservatoryDashboard() {
                             <span className="font-medium">{item.name}</span>
                             <span className="shrink-0">
                               <strong>{item.count}</strong>{' '}
-                              <span className="text-teal-700">{item.count === 1 ? 'vaga' : 'vagas'}</span>
+                              <span className="text-teal-700">{item.count === 1 ? 'vaga preenchida' : 'vagas preenchidas'}</span>
                             </span>
                           </div>
                           <div className="mt-1.5 h-2 w-full bg-teal-950/10">
@@ -883,15 +971,15 @@ export default function ObservatoryDashboard() {
           {activeTab === 'qa' && (
             <section className="space-y-6">
               <SectionTitle
-                title="6 perguntas estratégicas sobre empregos no turismo"
+                title={`${INITIAL_QUESTIONS.length} perguntas estratégicas sobre empregos no turismo`}
                 hint="Cada pergunta mostra uma prévia calculada na amostra mockada e um espaço para registrar a query e o resultado oficial após processar a base completa."
                 right={
                   <div className="min-w-[10rem]">
                     <div className="text-sm text-teal-800">
-                      <strong className="text-teal-950">{answeredCount}</strong> de 6 respondidas
+                      <strong className="text-teal-950">{answeredCount}</strong> de {INITIAL_QUESTIONS.length} respondidas
                     </div>
-                    <div className="mt-1.5 grid grid-cols-6 gap-1">
-                      {Array.from({ length: 6 }, (_, i) => (
+                    <div className="mt-1.5 grid gap-1" style={{ gridTemplateColumns: `repeat(${INITIAL_QUESTIONS.length}, minmax(0, 1fr))` }}>
+                      {Array.from({ length: INITIAL_QUESTIONS.length }, (_, i) => (
                         <span key={i} className={`h-1.5 ${i < answeredCount ? 'bg-teal-700' : 'bg-teal-950/15'}`} />
                       ))}
                     </div>

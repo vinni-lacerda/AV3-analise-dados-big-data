@@ -105,15 +105,38 @@ A solução deverá identificar os riscos associados ao uso dos dados e document
 
 ## 📁 Organização do repositório
 
-Estrutura **sugerida** para os artefatos do projeto, a ser criada conforme a necessidade:
+O projeto React está em `frontend/` e utiliza Next.js:
 
 ```text
 .
 ├── README.md
+├── frontend/
+│   ├── app/              # Rotas e layout da aplicação Next.js
+│   ├── src/              # Componentes, dados e estilos
+│   ├── package.json
+│   └── package-lock.json
 ├── docs/                 # Documento técnico, arquitetura e LGPD
 ├── diagrams/             # Fluxogramas e diagramas conceituais
-├── dashboard/            # Protótipos e referências visuais
 └── presentation/         # Material da apresentação
+```
+
+### ▶️ Como executar o frontend
+
+É necessário ter o **Node.js 20.9 ou superior** instalado. No terminal, acesse a pasta do frontend, instale as dependências e inicie o servidor de desenvolvimento:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Abra [http://localhost:3000](http://localhost:3000) no navegador. Para encerrar o servidor, pressione `Ctrl+C` no terminal.
+
+Para gerar e executar a versão de produção:
+
+```bash
+npm run build
+npm start
 ```
 
 ## 👥 Equipe
