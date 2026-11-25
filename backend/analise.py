@@ -1,7 +1,12 @@
 import json
-import sqlite3
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
+
+import polars as pl
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Connection
 
 MESES_NOMES = {
     1: "Janeiro",
@@ -19,15 +24,47 @@ MESES_NOMES = {
 }
 
 
-def conectar(caminho_db: Path) -> sqlite3.Connection:
+def conectar(caminho_db: Path) -> Connection:
+    """Abre uma conexão SQLAlchemy para leitura do banco analítico."""
     if not caminho_db.exists():
         raise FileNotFoundError(f"Banco SQLite não encontrado: {caminho_db}")
-    conexao = sqlite3.connect(caminho_db)
-    conexao.row_factory = sqlite3.Row
-    return conexao
+
+    engine = create_engine(f"sqlite:///{caminho_db.resolve().as_posix()}")
+
+    @event.listens_for(engine, "connect")
+    def _configurar_sqlite(dbapi_conexao, _registro) -> None:
+        cursor = dbapi_conexao.cursor()
+        try:
+            cursor.execute("PRAGMA query_only = ON;")
+            cursor.execute("PRAGMA cache_size = -65536;")  # 64 MiB
+            cursor.execute("PRAGMA temp_store = FILE;")
+            cursor.execute("PRAGMA mmap_size = 268435456;")  # até 256 MiB
+        finally:
+            cursor.close()
+
+    return engine.connect()
 
 
-def p1_cidades_mais_empregos(conexao: sqlite3.Connection, limite: int = 15) -> list[dict]:
+def _consultar(
+    conexao: Connection,
+    consulta: str,
+    parametros: Sequence[Any] = (),
+) -> list[dict[str, Any]]:
+    """Executa SQL no SQLite e materializa apenas o resultado agregado em Polars."""
+    resultado = conexao.exec_driver_sql(consulta, tuple(parametros))
+    colunas = list(resultado.keys())
+    linhas = resultado.fetchall()
+    if not linhas:
+        return []
+    return pl.DataFrame(linhas, schema=colunas, orient="row").to_dicts()
+
+
+def _escalar(conexao: Connection, consulta: str) -> Any:
+    """Retorna o primeiro valor de uma consulta escalar."""
+    return conexao.exec_driver_sql(consulta).scalar_one()
+
+
+def p1_cidades_mais_empregos(conexao: Connection, limite: int = 15) -> list[dict]:
     consulta = """
         SELECT
             m.municipio_codigo,
@@ -41,10 +78,12 @@ def p1_cidades_mais_empregos(conexao: sqlite3.Connection, limite: int = 15) -> l
         ORDER BY total_empregos DESC
         LIMIT ?;
     """
-    return [dict(linha) for linha in conexao.execute(consulta, (limite,)).fetchall()]
+    return _consultar(conexao, consulta, (limite,))
 
 
-def p2_meses_mais_admissoes_por_cidade(conexao: sqlite3.Connection, top_cidades: int = 10) -> list[dict]:
+def p2_meses_mais_admissoes_por_cidade(
+    conexao: Connection, top_cidades: int = 10
+) -> list[dict]:
     consulta = """
         WITH top_municipios AS (
             SELECT municipio_codigo
@@ -82,15 +121,17 @@ def p2_meses_mais_admissoes_por_cidade(conexao: sqlite3.Connection, top_cidades:
         ORDER BY municipio_nome ASC, posicao ASC;
     """
     resultados = []
-    for linha in conexao.execute(consulta, (top_cidades,)).fetchall():
+    for linha in _consultar(conexao, consulta, (top_cidades,)):
         item = dict(linha)
-        item["mes_nome"] = MESES_NOMES.get(item["mes_admissao"], str(item["mes_admissao"]))
+        item["mes_nome"] = MESES_NOMES.get(
+            item["mes_admissao"], str(item["mes_admissao"])
+        )
         resultados.append(item)
     return resultados
 
 
 def p3_cidades_maior_remuneracao(
-    conexao: sqlite3.Connection, minimo_vinculos: int = 500, limite: int = 15
+    conexao: Connection, minimo_vinculos: int = 500, limite: int = 15
 ) -> list[dict]:
     consulta = """
         WITH remuneracoes_validas AS (
@@ -131,11 +172,18 @@ def p3_cidades_maior_remuneracao(
         ORDER BY remuneracao_mediana_reais DESC, remuneracao_media_reais DESC
         LIMIT ?;
     """
-    return [dict(linha) for linha in conexao.execute(consulta, (minimo_vinculos, limite)).fetchall()]
+    return _consultar(
+        conexao,
+        consulta,
+        (
+            minimo_vinculos,
+            limite,
+        ),
+    )
 
 
 def p4_cnaes_maior_remuneracao_mediana_dezembro(
-    conexao: sqlite3.Connection, minimo_vinculos: int = 100, limite: int = 15
+    conexao: Connection, minimo_vinculos: int = 100, limite: int = 15
 ) -> list[dict]:
     consulta = """
         WITH remuneracoes_cnae AS (
@@ -179,11 +227,18 @@ def p4_cnaes_maior_remuneracao_mediana_dezembro(
         ORDER BY remuneracao_mediana_reais DESC
         LIMIT ?;
     """
-    return [dict(linha) for linha in conexao.execute(consulta, (minimo_vinculos, limite)).fetchall()]
+    return _consultar(
+        conexao,
+        consulta,
+        (
+            minimo_vinculos,
+            limite,
+        ),
+    )
 
 
 def p5_priorizar_busca_trabalho(
-    conexao: sqlite3.Connection, minimo_admissoes_mes: int = 100, limite: int = 15
+    conexao: Connection, minimo_admissoes_mes: int = 100, limite: int = 15
 ) -> list[dict]:
     consulta = """
         WITH base_cidade_mes AS (
@@ -234,14 +289,16 @@ def p5_priorizar_busca_trabalho(
         LIMIT ?;
     """
     resultados = []
-    for linha in conexao.execute(consulta, (minimo_admissoes_mes, limite)).fetchall():
+    for linha in _consultar(conexao, consulta, (minimo_admissoes_mes, limite)):
         item = dict(linha)
-        item["mes_nome"] = MESES_NOMES.get(item["mes_admissao"], str(item["mes_admissao"]))
+        item["mes_nome"] = MESES_NOMES.get(
+            item["mes_admissao"], str(item["mes_admissao"])
+        )
         resultados.append(item)
     return resultados
 
 
-def p6_cidades_por_cnae(conexao: sqlite3.Connection, top_cnaes: int = 10) -> list[dict]:
+def p6_cidades_por_cnae(conexao: Connection, top_cnaes: int = 10) -> list[dict]:
     consulta = """
         WITH top_atividades AS (
             SELECT cnae_subclasse, act_codigo
@@ -284,11 +341,11 @@ def p6_cidades_por_cnae(conexao: sqlite3.Connection, top_cnaes: int = 10) -> lis
         WHERE posicao <= 3
         ORDER BY cnae_subclasse ASC, posicao ASC;
     """
-    return [dict(linha) for linha in conexao.execute(consulta, (top_cnaes,)).fetchall()]
+    return _consultar(conexao, consulta, (top_cnaes,))
 
 
 def p7_participacao_mulheres(
-    conexao: sqlite3.Connection, minimo_vinculos: int = 200, limite: int = 15
+    conexao: Connection, minimo_vinculos: int = 200, limite: int = 15
 ) -> dict[str, list[dict]]:
     por_cidade = """
         SELECT
@@ -333,12 +390,14 @@ def p7_participacao_mulheres(
         LIMIT ?;
     """
     return {
-        "por_cidade": [dict(r) for r in conexao.execute(por_cidade, (minimo_vinculos, limite)).fetchall()],
-        "por_atividade": [dict(r) for r in conexao.execute(por_cnae, (minimo_vinculos, limite)).fetchall()],
+        "por_cidade": _consultar(conexao, por_cidade, (minimo_vinculos, limite)),
+        "por_atividade": _consultar(conexao, por_cnae, (minimo_vinculos, limite)),
     }
 
 
-def p8_escolaridade_mais_comum(conexao: sqlite3.Connection, limite: int = 15) -> dict[str, list[dict]]:
+def p8_escolaridade_mais_comum(
+    conexao: Connection, limite: int = 15
+) -> dict[str, list[dict]]:
     por_cidade = """
         WITH contagem AS (
             SELECT
@@ -404,14 +463,15 @@ def p8_escolaridade_mais_comum(conexao: sqlite3.Connection, limite: int = 15) ->
         LIMIT ?;
     """
     return {
-        "por_cidade": [dict(r) for r in conexao.execute(por_cidade, (limite,)).fetchall()],
-        "por_atividade": [dict(r) for r in conexao.execute(por_cnae, (limite,)).fetchall()],
+        "por_cidade": _consultar(conexao, por_cidade, (limite,)),
+        "por_atividade": _consultar(conexao, por_cnae, (limite,)),
     }
 
 
-def validar_consistencia_totais(conexao: sqlite3.Connection) -> dict:
-    total_geral = conexao.execute("SELECT COUNT(*) FROM empregos_turismo;").fetchone()[0]
-    soma_por_uf = conexao.execute(
+def validar_consistencia_totais(conexao: Connection) -> dict:
+    total_geral = _escalar(conexao, "SELECT COUNT(*) FROM empregos_turismo;")
+    soma_por_uf = _escalar(
+        conexao,
         """
         SELECT COALESCE(SUM(qtd), 0)
         FROM (
@@ -420,9 +480,10 @@ def validar_consistencia_totais(conexao: sqlite3.Connection) -> dict:
             JOIN municipios m ON m.municipio_codigo = e.municipio_codigo
             GROUP BY m.uf_codigo
         );
-        """
-    ).fetchone()[0]
-    soma_por_act = conexao.execute(
+        """,
+    )
+    soma_por_act = _escalar(
+        conexao,
         """
         SELECT COALESCE(SUM(qtd), 0)
         FROM (
@@ -430,8 +491,8 @@ def validar_consistencia_totais(conexao: sqlite3.Connection) -> dict:
             FROM empregos_turismo
             GROUP BY act_codigo
         );
-        """
-    ).fetchone()[0]
+        """,
+    )
     return {
         "total_geral_registros": total_geral,
         "soma_recorte_uf": soma_por_uf,
@@ -446,26 +507,38 @@ def gerar_relatorio_completo(caminho_db: Path) -> dict:
         return {
             "validacao_integridade": validar_consistencia_totais(conexao),
             "p1_cidades_mais_empregos": p1_cidades_mais_empregos(conexao),
-            "p2_meses_mais_admissoes_por_cidade": p2_meses_mais_admissoes_por_cidade(conexao),
+            "p2_meses_mais_admissoes_por_cidade": p2_meses_mais_admissoes_por_cidade(
+                conexao
+            ),
             "p3_cidades_maior_remuneracao": p3_cidades_maior_remuneracao(conexao),
-            "p4_cnaes_maior_remuneracao_mediana_dezembro": p4_cnaes_maior_remuneracao_mediana_dezembro(conexao),
+            "p4_cnaes_maior_remuneracao_mediana_dezembro": p4_cnaes_maior_remuneracao_mediana_dezembro(
+                conexao
+            ),
             "p5_priorizar_busca_trabalho": p5_priorizar_busca_trabalho(conexao),
             "p6_cidades_por_cnae": p6_cidades_por_cnae(conexao),
             "p7_participacao_mulheres": p7_participacao_mulheres(conexao),
             "p8_escolaridade_mais_comum": p8_escolaridade_mais_comum(conexao),
         }
     finally:
+        engine = conexao.engine
         conexao.close()
+        engine.dispose()
 
 
 if __name__ == "__main__":
     raiz_projeto = Path(__file__).resolve().parent.parent
-    caminho_db_padrao = Path(sys.argv[1]) if len(sys.argv) > 1 else raiz_projeto / "dados" / "turismo.db"
-    caminho_saida_json = raiz_projeto / "docs" / "indicadores_turismo_2025.json"
+    caminho_db_padrao = (
+        Path(sys.argv[1])
+        if len(sys.argv) > 1
+        else raiz_projeto / "dados" / "turismo.db"
+    )
+    caminho_saida_json = raiz_projeto / "docs" / "indicadores_turismo_2025_v2.json"
 
     relatorio = gerar_relatorio_completo(caminho_db_padrao)
     caminho_saida_json.parent.mkdir(parents=True, exist_ok=True)
-    caminho_saida_json.write_text(json.dumps(relatorio, ensure_ascii=False, indent=2), encoding="utf-8")
+    caminho_saida_json.write_text(
+        json.dumps(relatorio, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
     print("=== VALIDAÇÃO DE TOTAIS ===")
     print(json.dumps(relatorio["validacao_integridade"], ensure_ascii=False, indent=2))

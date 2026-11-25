@@ -1,10 +1,101 @@
-import csv
 import hashlib
-import json
-import sqlite3
+import shutil
 import sys
-import urllib.request
+import tempfile
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
+
+import polars as pl
+import requests
+from sqlalchemy import MetaData, create_engine, event, inspect, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.engine import Connection, Engine
+
+TAMANHO_LOTE = 10_000
+
+COLUNAS_ORIGEM = [
+    "Id",
+    "Ano",
+    "Municipio_Codigo",
+    "Municipio",
+    "UF_Codigo",
+    "UF",
+    "Regiao_Codigo",
+    "Regiao_UF",
+    "CNAE_2.0_Classe",
+    "CNAE_2.0_Subclasse",
+    "ACT_Codigo",
+    "ACT",
+    "Regiao_Turistica",
+    "Mes_Admissao",
+    "Remuneracao_Dezembro",
+    "Sexo",
+    "Escolaridade_Rotulo",
+]
+
+COLUNAS_OBRIGATORIAS = [
+    "Ano",
+    "Municipio_Codigo",
+    "Municipio",
+    "UF_Codigo",
+    "UF",
+    "Regiao_Codigo",
+    "Regiao_UF",
+    "CNAE_2.0_Classe",
+    "CNAE_2.0_Subclasse",
+    "ACT_Codigo",
+    "ACT",
+]
+
+RENOMEAR = {
+    "Municipio_Codigo": "municipio_codigo",
+    "Municipio": "municipio_nome",
+    "UF_Codigo": "uf_codigo",
+    "UF": "uf_nome",
+    "Regiao_Codigo": "regiao_codigo",
+    "Regiao_UF": "regiao_nome",
+    "CNAE_2.0_Classe": "cnae_classe",
+    "CNAE_2.0_Subclasse": "cnae_subclasse",
+    "ACT_Codigo": "act_codigo",
+    "ACT": "act_nome",
+    "Regiao_Turistica": "regiao_turistica",
+    "Sexo": "sexo",
+    "Escolaridade_Rotulo": "escolaridade",
+}
+
+CHAVE_DEDUP = [
+    "Id",
+    "ano_referencia",
+    "municipio_codigo",
+    "cnae_subclasse",
+    "act_codigo",
+    "mes_admissao",
+    "remuneracao_dezembro_centavos",
+    "sexo",
+    "escolaridade",
+]
+
+COLUNAS_FINAIS = [
+    "linha_origem",
+    "ano_referencia",
+    "municipio_codigo",
+    "municipio_nome",
+    "uf_codigo",
+    "uf_nome",
+    "regiao_codigo",
+    "regiao_nome",
+    "cnae_classe",
+    "cnae_subclasse",
+    "act_codigo",
+    "act_nome",
+    "regiao_turistica",
+    "mes_admissao",
+    "remuneracao_dezembro_centavos",
+    "sexo",
+    "escolaridade",
+]
 
 
 def calcular_sha256(caminho_arquivo: Path) -> str:
@@ -15,72 +106,255 @@ def calcular_sha256(caminho_arquivo: Path) -> str:
     return hasher.hexdigest()
 
 
-def limpar_texto(valor: str | None) -> str | None:
+def limpar_texto_py(valor: str | None) -> str | None:
+    """Versão escalar (usada só nas respostas da API do IBGE)."""
     if valor is None:
         return None
     texto = " ".join(valor.strip().split())
     return texto if texto else None
 
 
-def converter_mes(valor: str | None) -> int | None:
-    texto = limpar_texto(valor)
-    if not texto:
-        return None
-    try:
-        mes = int(float(texto.replace(",", ".")))
-        return mes if 1 <= mes <= 12 else None
-    except ValueError:
-        return None
+def expr_limpar_texto(coluna: str) -> pl.Expr:
+    """strip + colapsa espaços internos + string vazia vira NULL."""
+    texto = pl.col(coluna).cast(pl.Utf8).str.strip_chars().str.replace_all(r"\s+", " ")
+    return pl.when(texto.str.len_chars() > 0).then(texto).otherwise(None).alias(coluna)
 
 
-def converter_centavos(valor: str | None) -> int | None:
-    texto = limpar_texto(valor)
-    if not texto:
-        return None
-    try:
-        reais = float(texto.replace(",", "."))
-        if reais < 0:
-            return None
-        return int(round(reais * 100))
-    except ValueError:
-        return None
+def expr_float_finito(coluna: str, virgula_decimal: bool = True) -> pl.Expr:
+    """str -> float (aceitando vírgula decimal); inválido/NaN/inf vira NULL."""
+    texto = pl.col(coluna)
+    if virgula_decimal:
+        texto = texto.str.replace_all(",", ".")
+    valor = texto.cast(pl.Float64, strict=False)
+    return pl.when(valor.is_finite()).then(valor)
 
 
-def consultar_catalogo_ibge(endpoint: str, codigo: str, cache: dict[str, str | None]) -> str | None:
-    if codigo in cache:
-        return cache[codigo]
+def consultar_catalogo_ibge(endpoint: str, codigo: str) -> str | None:
     url = f"https://servicodados.ibge.gov.br/api/v2/cnae/{endpoint}/{codigo}"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=4) as resposta:
-            dados = json.loads(resposta.read().decode("utf-8"))
-            if isinstance(dados, list) and dados:
-                descricao = dados[0].get("descricao")
-            elif isinstance(dados, dict):
-                descricao = dados.get("descricao")
-            else:
-                descricao = None
-            cache[codigo] = limpar_texto(descricao)
+        resposta = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
+        resposta.raise_for_status()
+        dados = resposta.json()
+        if isinstance(dados, list) and dados:
+            descricao = dados[0].get("descricao")
+        elif isinstance(dados, dict):
+            descricao = dados.get("descricao")
+        else:
+            descricao = None
+        return limpar_texto_py(descricao)
     except Exception:
-        cache[codigo] = None
-    return cache[codigo]
+        return None
 
 
-def inicializar_banco(conexao: sqlite3.Connection, caminho_schema: Path) -> None:
-    conexao.execute("PRAGMA foreign_keys = ON;")
-    tabela_existe = conexao.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'empregos_turismo';"
-    ).fetchone()
-    if not tabela_existe:
-        script_sql = caminho_schema.read_text(encoding="utf-8")
-        conexao.executescript(script_sql)
-        conexao.execute("PRAGMA foreign_keys = ON;")
+def montar_catalogo(
+    endpoint: str, codigos: list[str], max_workers: int = 8
+) -> dict[str, str | None]:
+    """Consulta cada código único uma única vez (equivale ao cache do original)."""
+    codigos_unicos = list(dict.fromkeys(codigos))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        nomes = pool.map(lambda c: consultar_catalogo_ibge(endpoint, c), codigos_unicos)
+        return dict(zip(codigos_unicos, nomes))
+
+
+def detectar_encoding(caminho_csv: Path) -> str:
+    try:
+        with caminho_csv.open("r", encoding="utf-8-sig") as teste:
+            teste.read(4096)
+        return "utf-8-sig"
+    except UnicodeDecodeError:
+        return "latin-1"
 
 
 def detectar_delimitador(caminho_csv: Path, encoding: str) -> str:
     with caminho_csv.open("r", encoding=encoding, errors="replace") as arquivo:
         amostra = arquivo.readline()
     return ";" if amostra.count(";") > amostra.count(",") else ","
+
+
+@contextmanager
+def abrir_csv_lazy(
+    caminho_csv: Path, encoding: str, delimitador: str
+) -> Iterator[pl.LazyFrame]:
+    """
+    Devolve um LazyFrame com todas as colunas como texto (igual ao csv.DictReader).
+
+    O polars só lê UTF-8. Se o arquivo for latin-1, ele é transcodificado em blocos de 1 MB
+    para um arquivo temporário (memória constante) que é apagado ao final.
+    """
+    pasta_tmp: str | None = None
+    fonte = caminho_csv
+    try:
+        if encoding == "latin-1":
+            pasta_tmp = tempfile.mkdtemp(prefix="etl_turismo_")
+            fonte = Path(pasta_tmp) / "entrada_utf8.csv"
+            with (
+                caminho_csv.open("r", encoding="latin-1", newline="") as ent,
+                fonte.open("w", encoding="utf-8", newline="") as sai,
+            ):
+                shutil.copyfileobj(ent, sai, length=1024 * 1024)
+
+        lf = pl.scan_csv(
+            fonte,
+            separator=delimitador,
+            infer_schema=False,  # tudo como texto
+            truncate_ragged_lines=True,
+        )
+
+        # BOM no nome da primeira coluna (utf-8-sig)
+        nomes = lf.collect_schema().names()
+        sem_bom = {n: n.lstrip("\ufeff") for n in nomes if n.startswith("\ufeff")}
+        if sem_bom:
+            lf = lf.rename(sem_bom)
+            nomes = lf.collect_schema().names()
+
+        # Colunas ausentes se comportam como linha.get(...) -> None
+        faltantes = [c for c in COLUNAS_ORIGEM if c not in nomes]
+        if faltantes:
+            lf = lf.with_columns(
+                [pl.lit(None, dtype=pl.Utf8).alias(c) for c in faltantes]
+            )
+
+        yield lf.select(COLUNAS_ORIGEM)
+    finally:
+        if pasta_tmp:
+            shutil.rmtree(pasta_tmp, ignore_errors=True)
+
+
+def transformar(lf: pl.LazyFrame) -> tuple[pl.DataFrame, int, dict[str, int]]:
+    # linha_origem: posição 1-based da linha de dados no CSV (antes de qualquer descarte)
+    base = (
+        lf.with_row_index("linha_origem", offset=1)
+        .with_columns(pl.col("linha_origem").cast(pl.Int64))
+        .with_columns([expr_limpar_texto(c) for c in COLUNAS_ORIGEM])
+        .with_columns(
+            pl.all_horizontal(pl.col(COLUNAS_OBRIGATORIAS).is_not_null()).alias(
+                "_ok_obrigatorios"
+            ),
+            # int(float(ano_raw)) — sem troca de vírgula, como no original
+            expr_float_finito("Ano", virgula_decimal=False)
+            .cast(pl.Int64, strict=False)
+            .alias("ano_referencia"),
+        )
+    )
+
+    # Passo 1 (streaming, memória mínima): contagens de lidos e dos dois primeiros descartes
+    lidos, sem_obrigatorios, ano_invalido = (
+        base.select(
+            pl.len().alias("lidos"),
+            (~pl.col("_ok_obrigatorios")).sum().alias("sem_obrigatorios"),
+            (pl.col("_ok_obrigatorios") & pl.col("ano_referencia").is_null())
+            .sum()
+            .alias("ano_invalido"),
+        )
+        .collect(engine="streaming")
+        .row(0)
+    )
+    validos_antes_dedup = lidos - sem_obrigatorios - ano_invalido
+
+    # Passo 2 (streaming): filtros, conversões e deduplicação (mantém a 1ª ocorrência)
+    mes = expr_float_finito("Mes_Admissao").cast(pl.Int64, strict=False)
+    reais = expr_float_finito("Remuneracao_Dezembro")
+    limpo = (
+        base.filter(pl.col("_ok_obrigatorios") & pl.col("ano_referencia").is_not_null())
+        .with_columns(
+            pl.when(mes.is_between(1, 12)).then(mes).alias("mes_admissao"),
+            pl.when(reais >= 0)
+            .then(
+                (reais * 100).round(0, mode="half_to_even").cast(pl.Int64, strict=False)
+            )
+            .alias("remuneracao_dezembro_centavos"),  # half_to_even = round() do Python
+        )
+        .rename(RENOMEAR)
+        .unique(subset=CHAVE_DEDUP, keep="first", maintain_order=True)
+        .select(
+            COLUNAS_FINAIS
+        )  # descarta Id e colunas auxiliares antes de materializar
+        .collect(engine="streaming")
+    )
+
+    descartados = {
+        "campos_obrigatorios_ausentes": sem_obrigatorios,
+        "ano_referencia_invalido": ano_invalido,
+        "duplicata_no_arquivo": validos_antes_dedup - limpo.height,
+    }
+    return limpo, lidos, descartados
+
+
+def montar_tabelas(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    municipios = df.select(
+        "municipio_codigo",
+        "municipio_nome",
+        "uf_codigo",
+        "uf_nome",
+        "regiao_codigo",
+        "regiao_nome",
+    ).unique(subset=["municipio_codigo"], keep="first", maintain_order=True)
+
+    atividades = df.select(
+        "cnae_subclasse", "act_codigo", "cnae_classe", "act_nome"
+    ).unique(subset=["cnae_subclasse", "act_codigo"], keep="first", maintain_order=True)
+
+    classes = montar_catalogo("classes", atividades["cnae_classe"].to_list())
+    subclasses = montar_catalogo("subclasses", atividades["cnae_subclasse"].to_list())
+    atividades = atividades.with_columns(
+        pl.Series(
+            "cnae_classe_nome",
+            [classes[c] for c in atividades["cnae_classe"]],
+            dtype=pl.Utf8,
+        ),
+        pl.Series(
+            "cnae_subclasse_nome",
+            [subclasses[c] for c in atividades["cnae_subclasse"]],
+            dtype=pl.Utf8,
+        ),
+    )
+
+    empregos = df.select(
+        "linha_origem",
+        "ano_referencia",
+        "municipio_codigo",
+        "cnae_subclasse",
+        "act_codigo",
+        "regiao_turistica",
+        "mes_admissao",
+        "remuneracao_dezembro_centavos",
+        "sexo",
+        "escolaridade",
+    )
+    return municipios, atividades, empregos
+
+
+def criar_engine(caminho_db: Path) -> Engine:
+    engine = create_engine(f"sqlite:///{caminho_db}")
+
+    @event.listens_for(engine, "connect")
+    def _ativar_fk(
+        dbapi_conexao, _registro
+    ):  # PRAGMA foreign_keys = ON em toda conexão
+        cursor = dbapi_conexao.cursor()
+        cursor.execute("PRAGMA foreign_keys = ON;")
+        cursor.close()
+
+    return engine
+
+
+def inicializar_banco(engine: Engine, caminho_schema: Path) -> None:
+    if not inspect(engine).has_table("empregos_turismo"):
+        script_sql = caminho_schema.read_text(encoding="utf-8")
+        bruta = engine.raw_connection()
+        try:
+            bruta.driver_connection.executescript(script_sql)
+            bruta.commit()
+        finally:
+            bruta.close()
+
+
+def inserir_em_lotes(conexao: Connection, comando, df: pl.DataFrame) -> None:
+    """Converte para dict apenas uma fatia por vez, para não duplicar o DataFrame em memória."""
+    if df.is_empty():
+        return
+    for fatia in df.iter_slices(n_rows=TAMANHO_LOTE):
+        conexao.execute(comando, fatia.to_dicts())
 
 
 def executar_etl(caminho_csv: Path, caminho_db: Path, caminho_schema: Path) -> None:
@@ -92,14 +366,31 @@ def executar_etl(caminho_csv: Path, caminho_db: Path, caminho_schema: Path) -> N
     caminho_db.parent.mkdir(parents=True, exist_ok=True)
     sha256_arquivo = calcular_sha256(caminho_csv)
 
-    conexao = sqlite3.connect(caminho_db)
+    engine = criar_engine(caminho_db)
     try:
-        inicializar_banco(conexao, caminho_schema)
+        inicializar_banco(engine, caminho_schema)
 
-        ja_importado = conexao.execute(
-            "SELECT arquivo_id, nome_arquivo FROM arquivos_importados WHERE sha256 = ?;",
-            (sha256_arquivo,),
-        ).fetchone()
+        metadata = MetaData()
+        metadata.reflect(
+            bind=engine,
+            only=[
+                "arquivos_importados",
+                "municipios",
+                "atividades",
+                "empregos_turismo",
+            ],
+        )
+        t_arquivos = metadata.tables["arquivos_importados"]
+        t_municipios = metadata.tables["municipios"]
+        t_atividades = metadata.tables["atividades"]
+        t_empregos = metadata.tables["empregos_turismo"]
+    
+        with engine.connect() as conexao:
+            ja_importado = conexao.execute(
+                select(t_arquivos.c.arquivo_id, t_arquivos.c.nome_arquivo).where(
+                    t_arquivos.c.sha256 == sha256_arquivo
+                )
+            ).first()
         if ja_importado:
             print(
                 f"Arquivo já importado anteriormente (arquivo_id={ja_importado[0]}, "
@@ -107,211 +398,44 @@ def executar_etl(caminho_csv: Path, caminho_db: Path, caminho_schema: Path) -> N
             )
             return
 
-        encoding = "utf-8-sig"
-        try:
-            with caminho_csv.open("r", encoding=encoding) as teste:
-                teste.read(4096)
-        except UnicodeDecodeError:
-            encoding = "latin-1"
-
+        encoding = detectar_encoding(caminho_csv)
         delimitador = detectar_delimitador(caminho_csv, encoding)
 
-        lidos = 0
-        aceitos = 0
-        descartados: dict[str, int] = {
-            "campos_obrigatorios_ausentes": 0,
-            "ano_referencia_invalido": 0,
-            "duplicata_no_arquivo": 0,
-        }
+        print(
+            f"Lendo e limpando o CSV (encoding={encoding}, delimitador={delimitador!r})..."
+        )
+        with abrir_csv_lazy(caminho_csv, encoding, delimitador) as lf:
+            limpo, lidos, descartados = transformar(lf)
 
-        municipios_vistos: set[str] = set()
-        atividades_vistas: set[tuple[str, str]] = set()
-        registros_vistos: set[tuple] = set()
-        cache_classes: dict[str, str | None] = {}
-        cache_subclasses: dict[str, str | None] = {}
+        print("Consultando catálogo CNAE do IBGE...")
+        municipios, atividades, empregos = montar_tabelas(limpo)
+        del limpo
+        aceitos = empregos.height
 
-        lote_municipios: list[tuple] = []
-        lote_atividades: list[tuple] = []
-        lote_empregos: list[tuple] = []
+        print(f"Gravando {aceitos} registros no SQLite...")
+        # Transação única: se algo falhar, nada é gravado (igual ao `with conexao:` original)
+        with engine.begin() as conexao:
+            arquivo_id = conexao.execute(
+                t_arquivos.insert().values(
+                    nome_arquivo=caminho_csv.name, sha256=sha256_arquivo
+                )
+            ).inserted_primary_key[0]
 
-        with conexao:
-            cursor = conexao.execute(
-                "INSERT INTO arquivos_importados (nome_arquivo, sha256) VALUES (?, ?);",
-                (caminho_csv.name, sha256_arquivo),
+            inserir_em_lotes(
+                conexao,
+                sqlite_insert(t_municipios).on_conflict_do_nothing(),
+                municipios,
             )
-            arquivo_id = cursor.lastrowid
-
-            with caminho_csv.open("r", encoding=encoding, newline="") as arquivo:
-                leitor = csv.DictReader(arquivo, delimiter=delimitador)
-                for linha_origem, linha in enumerate(leitor, start=1):
-                    lidos += 1
-
-                    ano_raw = limpar_texto(linha.get("Ano"))
-                    municipio_codigo = limpar_texto(linha.get("Municipio_Codigo"))
-                    municipio_nome = limpar_texto(linha.get("Municipio"))
-                    uf_codigo = limpar_texto(linha.get("UF_Codigo"))
-                    uf_nome = limpar_texto(linha.get("UF"))
-                    regiao_codigo = limpar_texto(linha.get("Regiao_Codigo"))
-                    regiao_nome = limpar_texto(linha.get("Regiao_UF"))
-                    cnae_classe = limpar_texto(linha.get("CNAE_2.0_Classe"))
-                    cnae_subclasse = limpar_texto(linha.get("CNAE_2.0_Subclasse"))
-                    act_codigo = limpar_texto(linha.get("ACT_Codigo"))
-                    act_nome = limpar_texto(linha.get("ACT"))
-
-                    if not all(
-                        [
-                            ano_raw,
-                            municipio_codigo,
-                            municipio_nome,
-                            uf_codigo,
-                            uf_nome,
-                            regiao_codigo,
-                            regiao_nome,
-                            cnae_classe,
-                            cnae_subclasse,
-                            act_codigo,
-                            act_nome,
-                        ]
-                    ):
-                        descartados["campos_obrigatorios_ausentes"] += 1
-                        continue
-
-                    try:
-                        ano_referencia = int(float(ano_raw))
-                    except ValueError:
-                        descartados["ano_referencia_invalido"] += 1
-                        continue
-
-                    regiao_turistica = limpar_texto(linha.get("Regiao_Turistica"))
-                    mes_admissao = converter_mes(linha.get("Mes_Admissao"))
-                    remuneracao_centavos = converter_centavos(linha.get("Remuneracao_Dezembro"))
-                    sexo = limpar_texto(linha.get("Sexo"))
-                    escolaridade = limpar_texto(linha.get("Escolaridade_Rotulo"))
-
-                    chave_dedup = (
-                        limpar_texto(linha.get("Id")),
-                        ano_referencia,
-                        municipio_codigo,
-                        cnae_subclasse,
-                        act_codigo,
-                        mes_admissao,
-                        remuneracao_centavos,
-                        sexo,
-                        escolaridade,
-                    )
-                    if chave_dedup in registros_vistos:
-                        descartados["duplicata_no_arquivo"] += 1
-                        continue
-                    registros_vistos.add(chave_dedup)
-
-                    if municipio_codigo not in municipios_vistos:
-                        municipios_vistos.add(municipio_codigo)
-                        lote_municipios.append(
-                            (
-                                municipio_codigo,
-                                municipio_nome,
-                                uf_codigo,
-                                uf_nome,
-                                regiao_codigo,
-                                regiao_nome,
-                            )
-                        )
-
-                    chave_atividade = (cnae_subclasse, act_codigo)
-                    if chave_atividade not in atividades_vistas:
-                        atividades_vistas.add(chave_atividade)
-                        classe_nome = consultar_catalogo_ibge("classes", cnae_classe, cache_classes)
-                        subclasse_nome = consultar_catalogo_ibge(
-                            "subclasses", cnae_subclasse, cache_subclasses
-                        )
-                        lote_atividades.append(
-                            (
-                                cnae_subclasse,
-                                act_codigo,
-                                cnae_classe,
-                                act_nome,
-                                classe_nome,
-                                subclasse_nome,
-                            )
-                        )
-
-                    lote_empregos.append(
-                        (
-                            arquivo_id,
-                            linha_origem,
-                            ano_referencia,
-                            municipio_codigo,
-                            cnae_subclasse,
-                            act_codigo,
-                            regiao_turistica,
-                            mes_admissao,
-                            remuneracao_centavos,
-                            sexo,
-                            escolaridade,
-                        )
-                    )
-                    aceitos += 1
-
-                    if len(lote_empregos) >= 10000:
-                        conexao.executemany(
-                            """
-                            INSERT OR IGNORE INTO municipios (
-                                municipio_codigo, municipio_nome, uf_codigo, uf_nome, regiao_codigo, regiao_nome
-                            ) VALUES (?, ?, ?, ?, ?, ?);
-                            """,
-                            lote_municipios,
-                        )
-                        conexao.executemany(
-                            """
-                            INSERT OR IGNORE INTO atividades (
-                                cnae_subclasse, act_codigo, cnae_classe, act_nome, cnae_classe_nome, cnae_subclasse_nome
-                            ) VALUES (?, ?, ?, ?, ?, ?);
-                            """,
-                            lote_atividades,
-                        )
-                        conexao.executemany(
-                            """
-                            INSERT INTO empregos_turismo (
-                                arquivo_id, linha_origem, ano_referencia, municipio_codigo,
-                                cnae_subclasse, act_codigo, regiao_turistica, mes_admissao,
-                                remuneracao_dezembro_centavos, sexo, escolaridade
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                            """,
-                            lote_empregos,
-                        )
-                        lote_municipios.clear()
-                        lote_atividades.clear()
-                        lote_empregos.clear()
-
-            if lote_municipios:
-                conexao.executemany(
-                    """
-                    INSERT OR IGNORE INTO municipios (
-                        municipio_codigo, municipio_nome, uf_codigo, uf_nome, regiao_codigo, regiao_nome
-                    ) VALUES (?, ?, ?, ?, ?, ?);
-                    """,
-                    lote_municipios,
-                )
-            if lote_atividades:
-                conexao.executemany(
-                    """
-                    INSERT OR IGNORE INTO atividades (
-                        cnae_subclasse, act_codigo, cnae_classe, act_nome, cnae_classe_nome, cnae_subclasse_nome
-                    ) VALUES (?, ?, ?, ?, ?, ?);
-                    """,
-                    lote_atividades,
-                )
-            if lote_empregos:
-                conexao.executemany(
-                    """
-                    INSERT INTO empregos_turismo (
-                        arquivo_id, linha_origem, ano_referencia, municipio_codigo,
-                        cnae_subclasse, act_codigo, regiao_turistica, mes_admissao,
-                        remuneracao_dezembro_centavos, sexo, escolaridade
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                    """,
-                    lote_empregos,
-                )
+            inserir_em_lotes(
+                conexao,
+                sqlite_insert(t_atividades).on_conflict_do_nothing(),
+                atividades,
+            )
+            inserir_em_lotes(
+                conexao,
+                t_empregos.insert(),
+                empregos.with_columns(pl.lit(arquivo_id).alias("arquivo_id")),
+            )
 
         total_descartados = sum(descartados.values())
         print("=== RESUMO DA EXECUÇÃO DO ETL ===")
@@ -323,12 +447,20 @@ def executar_etl(caminho_csv: Path, caminho_db: Path, caminho_schema: Path) -> N
             print(f"  - {motivo}: {qtd}")
         print(f"Banco SQLite gerado: {caminho_db}")
     finally:
-        conexao.close()
+        engine.dispose()
 
 
 if __name__ == "__main__":
     raiz_projeto = Path(__file__).resolve().parent.parent
-    caminho_csv_padrao = Path(sys.argv[1]) if len(sys.argv) > 1 else raiz_projeto / "dados" / "RAIS_Turismo_2025.csv"
-    caminho_db_padrao = Path(sys.argv[2]) if len(sys.argv) > 2 else raiz_projeto / "dados" / "turismo.db"
+    caminho_csv_padrao = (
+        Path(sys.argv[1])
+        if len(sys.argv) > 1
+        else raiz_projeto / "dados" / "RAIS_Turismo_2025.csv"
+    )
+    caminho_db_padrao = (
+        Path(sys.argv[2])
+        if len(sys.argv) > 2
+        else raiz_projeto / "dados" / "turismo.db"
+    )
     caminho_schema_padrao = raiz_projeto / "dados" / "schema.sql"
     executar_etl(caminho_csv_padrao, caminho_db_padrao, caminho_schema_padrao)
