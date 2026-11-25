@@ -53,13 +53,12 @@ def obter_serie_mensal(conexao: Any) -> list[dict[str, int]]:
 
 def gerar_serie_mock_fallback() -> list[dict[str, int]]:
     """
-    Gera série mensal de fallback baseada nos 40 registros de MOCK_TOURISM_DATA
+    Gera série mensal de fallback baseada nos registros mockados
     distribuídos ao longo de 2024 e 2025 para ilustrar a previsão sazonal
-    enquanto o CSV oficial ainda não foi processado.
+    enquanto o banco real não está disponível.
     """
-    # Distribuição mensal inspirada nos registros mockados (40 vínculos/ano com sazonalidade de verão/férias)
-    padrao_2024 = [5, 4, 3, 2, 2, 3, 4, 2, 2, 3, 4, 6]  # soma = 40
-    padrao_2025 = [6, 5, 3, 2, 3, 3, 5, 2, 3, 3, 4, 7]  # soma = 46
+    padrao_2024 = [5, 4, 3, 2, 2, 3, 4, 2, 2, 3, 4, 6]
+    padrao_2025 = [6, 5, 3, 2, 3, 3, 5, 2, 3, 3, 4, 7]
 
     serie: list[dict[str, int]] = []
     for mes, total in enumerate(padrao_2024, start=1):
@@ -164,11 +163,11 @@ def montar_resultado_previsao(
             "anos_disponiveis": anos,
         }
 
-    if len(serie) < 24:
+    if len(serie) < 12:
         return {
             "disponivel": False,
             "origem_dados": origem_dados,
-            "mensagem": "Histórico insuficiente. São necessários pelo menos dois anos completos (24 meses) de dados mensais.",
+            "mensagem": "Histórico insuficiente. É necessário pelo menos um ciclo anual completo (12 meses) de dados mensais.",
             "anos_disponiveis": anos,
         }
 
@@ -176,17 +175,14 @@ def montar_resultado_previsao(
     comparacoes = executar_backtesting(serie)
     mae = calcular_mae(comparacoes)
 
-    limitacoes = [
-        "O modelo utiliza apenas a repetição do mesmo mês do ano anterior (naive sazonal), sem capturar tendências estruturais ou choques econômicos.",
-        "Os dados refletem admissões em empregos formais da RAIS e não representam diretamente o fluxo físico de turistas.",
-        "A projeção pressupõe que todos os anos presentes na base estejam completos de janeiro a dezembro.",
-    ]
-
-    if origem_dados == "mock_fallback":
-        limitacoes.insert(
-            0,
-            "Modo secundário ativo: os valores abaixo foram gerados a partir da amostra mockada (MOCK_TOURISM_DATA) porque o CSV oficial ainda não foi carregado no banco.",
+    observacao_backtesting = (
+        None
+        if comparacoes
+        else (
+            f"A base contém apenas o ano de {anos[0]} ({len(serie)} meses). "
+            "A projeção sazonal é calculada normalmente, mas o backtesting exige um ano anterior para comparação."
         )
+    )
 
     return {
         "disponivel": True,
@@ -197,15 +193,12 @@ def montar_resultado_previsao(
         "serie_observada": serie,
         "previsoes": previsoes,
         "backtesting": {
+            "disponivel": len(comparacoes) > 0,
             "mae": mae,
             "total_meses_avaliados": len(comparacoes),
             "comparacoes": comparacoes,
+            "observacao": observacao_backtesting,
         },
-        "limitacoes": limitacoes,
-        "orientacao_planejamento": (
-            "Utilize as estimativas como referência inicial para dimensionamento sazonal de equipes e contratações "
-            "no setor turístico, combinando sempre com indicadores conjunturais locais e calendário de eventos."
-        ),
     }
 
 
@@ -214,9 +207,8 @@ def analisar_previsao_sazonal(
     horizonte: int = 3,
 ) -> dict[str, Any]:
     """
-    Executa a análise preditiva sazonal usando o banco SQLite (CSV real) como fonte
-    primária e recorrendo ao fallback baseado em MOCK_TOURISM_DATA quando o banco
-    não existir ou estiver vazio.
+    Executa a análise preditiva sazonal usando o banco SQLite como fonte
+    primária e recorrendo ao fallback quando a conexão não existir ou estiver vazia.
     """
     if conexao is not None:
         serie_real = obter_serie_mensal(conexao)
