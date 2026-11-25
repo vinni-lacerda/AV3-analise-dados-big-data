@@ -1,7 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { MOCK_TOURISM_DATA } from '../data/raisTourism';
+import React, { useEffect, useMemo, useState } from 'react';
 
 interface SerieItem {
   ano: number;
@@ -34,9 +33,11 @@ interface PrevisaoData {
   serie_observada?: SerieItem[];
   previsoes?: PrevisaoItem[];
   backtesting?: {
+    disponivel?: boolean;
     mae: number;
     total_meses_avaliados: number;
     comparacoes: ComparacaoItem[];
+    observacao?: string | null;
   };
 }
 
@@ -55,28 +56,29 @@ const NOMES_MESES: Record<number, string> = {
   12: 'Dez',
 };
 
+const PESOS_2024 = [5, 4, 3, 2, 2, 3, 4, 2, 2, 3, 4, 6];
+const PESOS_2025 = [6, 5, 3, 2, 3, 3, 5, 2, 3, 3, 4, 7];
+
 function formatarMesAno(mes: number, ano: number): string {
   return `${NOMES_MESES[mes] ?? String(mes).padStart(2, '0')}/${ano}`;
 }
 
-function construirFallbackLocal(): PrevisaoData {
-  const pesos2024 = [5, 4, 3, 2, 2, 3, 4, 2, 2, 3, 4, 6];
-  const pesos2025 = [6, 5, 3, 2, 3, 3, 5, 2, 3, 3, 4, 7];
+function avancarMesAno(ano: number, mes: number, passos: number): { ano: number; mes: number } {
+  const totalMeses = ano * 12 + (mes - 1) + passos;
+  return {
+    ano: Math.floor(totalMeses / 12),
+    mes: (totalMeses % 12) + 1,
+  };
+}
 
+function construirFallbackLocal(): PrevisaoData {
   const serie_observada: SerieItem[] = [
-    ...pesos2024.map((v, idx) => ({ ano: 2024, mes: idx + 1, total_admissoes: v })),
-    ...pesos2025.map((v, idx) => ({ ano: 2025, mes: idx + 1, total_admissoes: v })),
+    ...PESOS_2024.map((v, idx) => ({ ano: 2024, mes: idx + 1, total_admissoes: v })),
+    ...PESOS_2025.map((v, idx) => ({ ano: 2025, mes: idx + 1, total_admissoes: v })),
   ];
 
-  const previsoes: PrevisaoItem[] = [1, 2, 3].map((mes) => ({
-    ano: 2026,
-    mes,
-    previsto: pesos2025[mes - 1],
-    referencia: `${String(mes).padStart(2, '0')}/2025`,
-  }));
-
-  const comparacoes: ComparacaoItem[] = pesos2025.map((real, idx) => {
-    const previsto = pesos2024[idx];
+  const comparacoes: ComparacaoItem[] = PESOS_2025.map((real, idx) => {
+    const previsto = PESOS_2024[idx];
     return {
       ano: 2025,
       mes: idx + 1,
@@ -97,11 +99,13 @@ function construirFallbackLocal(): PrevisaoData {
     horizonte_meses: 3,
     anos_disponiveis: [2024, 2025],
     serie_observada,
-    previsoes,
+    previsoes: [],
     backtesting: {
+      disponivel: true,
       mae,
       total_meses_avaliados: comparacoes.length,
       comparacoes,
+      observacao: null,
     },
   };
 }
@@ -109,6 +113,7 @@ function construirFallbackLocal(): PrevisaoData {
 export default function ForecastSection() {
   const [dados, setDados] = useState<PrevisaoData | null>(null);
   const [carregando, setCarregando] = useState(true);
+  const [horizonteMeses, setHorizonteMeses] = useState<number>(3);
 
   useEffect(() => {
     let ativo = true;
@@ -126,6 +131,9 @@ export default function ForecastSection() {
         const json = JSON.parse(texto) as PrevisaoData;
         if (ativo) {
           setDados(json);
+          if (json.horizonte_meses && json.horizonte_meses >= 1 && json.horizonte_meses <= 12) {
+            setHorizonteMeses(json.horizonte_meses);
+          }
         }
       } catch {
         if (ativo) {
@@ -143,6 +151,59 @@ export default function ForecastSection() {
       ativo = false;
     };
   }, []);
+
+  const calculadoPorHorizonte = useMemo(() => {
+    if (!dados || !dados.disponivel) {
+      return null;
+    }
+
+    const serieBase =
+      dados.serie_observada && dados.serie_observada.length >= 12
+        ? [...dados.serie_observada].sort((a, b) => a.ano - b.ano || a.mes - b.mes)
+        : construirFallbackLocal().serie_observada!;
+
+    const mapaSerie = new Map<string, number>();
+    serieBase.forEach((item) => {
+      mapaSerie.set(`${item.ano}-${item.mes}`, item.total_admissoes);
+    });
+
+    const ultimoPonto = serieBase[serieBase.length - 1];
+    const previsoesDinamicas: PrevisaoItem[] = [];
+
+    for (let passo = 1; passo <= horizonteMeses; passo++) {
+      const alvo = avancarMesAno(ultimoPonto.ano, ultimoPonto.mes, passo);
+      const ref = avancarMesAno(alvo.ano, alvo.mes, -12);
+      const valorRef = mapaSerie.get(`${ref.ano}-${ref.mes}`) ?? 0;
+
+      previsoesDinamicas.push({
+        ano: alvo.ano,
+        mes: alvo.mes,
+        previsto: valorRef,
+        referencia: `${String(ref.mes).padStart(2, '0')}/${ref.ano}`,
+      });
+    }
+
+    const todasComparacoes = dados.backtesting?.comparacoes ?? [];
+    const temBacktesting = todasComparacoes.length > 0;
+    const comparacoesRecortadas = temBacktesting ? todasComparacoes.slice(-horizonteMeses) : [];
+    const maeRecortado = temBacktesting
+      ? Number(
+          (
+            comparacoesRecortadas.reduce((acc, item) => acc + item.erro_absoluto, 0) /
+            comparacoesRecortadas.length
+          ).toFixed(2)
+        )
+      : 0;
+
+    return {
+      previsoes: previsoesDinamicas,
+      comparacoes: comparacoesRecortadas,
+      temBacktesting,
+      mae: maeRecortado,
+      totalAvaliados: comparacoesRecortadas.length,
+      observacaoBacktesting: dados.backtesting?.observacao ?? null,
+    };
+  }, [dados, horizonteMeses]);
 
   if (carregando) {
     return (
@@ -170,7 +231,7 @@ export default function ForecastSection() {
         </div>
       </div>
 
-      {!dados.disponivel ? (
+      {!dados.disponivel || !calculadoPorHorizonte ? (
         <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
           <p className="font-medium">{dados.mensagem}</p>
           {dados.anos_disponiveis && dados.anos_disponiveis.length > 0 && (
@@ -188,29 +249,59 @@ export default function ForecastSection() {
               </p>
               <p className="mt-1 text-sm font-semibold text-teal-950">{dados.metodo}</p>
             </div>
+
             <div className="rounded-lg border border-teal-950/15 bg-white p-4">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-teal-700">
+              <label
+                htmlFor="horizonte-projetado-select"
+                className="block text-[11px] font-semibold uppercase tracking-wide text-teal-700"
+              >
                 Horizonte projetado
-              </p>
-              <p className="mt-1 text-2xl font-bold text-teal-950">
-                {dados.horizonte_meses} meses
-              </p>
+              </label>
+              <div className="mt-1 flex items-baseline gap-2">
+                <select
+                  id="horizonte-projetado-select"
+                  value={horizonteMeses}
+                  onChange={(e) => setHorizonteMeses(Number(e.target.value))}
+                  className="cursor-pointer rounded-md border border-teal-950/20 bg-white px-2.5 py-1 text-xl font-bold text-teal-950 focus:border-teal-700 focus:outline-none"
+                >
+                  {Array.from({ length: 12 }, (_, idx) => idx + 1).map((meses) => (
+                    <option key={meses} value={meses}>
+                      {meses} {meses === 1 ? 'mês' : 'meses'}
+                    </option>
+                  ))}
+                </select>
+                <span className="text-xs text-teal-700">de 1 a 12 meses</span>
+              </div>
             </div>
+
             <div className="rounded-lg border border-teal-950/15 bg-white p-4">
               <p className="text-[11px] font-semibold uppercase tracking-wide text-teal-700">
                 Erro Absoluto Médio (MAE)
               </p>
-              <p className="mt-1 text-2xl font-bold text-teal-950">
-                {dados.backtesting?.mae ?? 0}{' '}
-                <span className="text-xs font-normal text-teal-700">admissões/mês</span>
-              </p>
+              {calculadoPorHorizonte.temBacktesting ? (
+                <p className="mt-1 text-2xl font-bold text-teal-950">
+                  {calculadoPorHorizonte.mae}{' '}
+                  <span className="text-xs font-normal text-teal-700">
+                    admissões/mês ({calculadoPorHorizonte.totalAvaliados}{' '}
+                    {calculadoPorHorizonte.totalAvaliados === 1 ? 'mês' : 'meses'})
+                  </span>
+                </p>
+              ) : (
+                <p className="mt-1 text-sm font-semibold text-teal-950">
+                  Indisponível{' '}
+                  <span className="block text-xs font-normal text-teal-700">
+                    Requer ano anterior na série
+                  </span>
+                </p>
+              )}
             </div>
           </div>
 
-          {dados.previsoes && dados.previsoes.length > 0 && (
+          {calculadoPorHorizonte.previsoes.length > 0 && (
             <div className="rounded-lg border border-teal-950/15 bg-white p-4">
               <h3 className="mb-3 text-base font-semibold text-teal-950">
-                Projeção de admissões (próximos {dados.horizonte_meses} meses)
+                Projeção de admissões ({horizonteMeses}{' '}
+                {horizonteMeses === 1 ? 'próximo mês' : 'próximos meses'})
               </h3>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-sm">
@@ -222,7 +313,7 @@ export default function ForecastSection() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-teal-950/10">
-                    {dados.previsoes.map((item) => (
+                    {calculadoPorHorizonte.previsoes.map((item) => (
                       <tr key={`${item.ano}-${item.mes}`}>
                         <td className="py-2 pr-4 font-medium text-teal-950">
                           {formatarMesAno(item.mes, item.ano)}
@@ -239,14 +330,16 @@ export default function ForecastSection() {
             </div>
           )}
 
-          {dados.backtesting && dados.backtesting.comparacoes.length > 0 && (
+          {calculadoPorHorizonte.temBacktesting ? (
             <div className="space-y-4">
               <div className="rounded-lg border border-teal-950/15 bg-white p-4">
                 <h3 className="mb-1 text-base font-semibold text-teal-950">
                   Avaliação temporal (Backtesting — Observado vs. Estimado)
                 </h3>
                 <p className="mb-3 text-xs text-teal-700">
-                  Cada mês foi previsto usando exclusivamente o mesmo mês de 12 meses antes.
+                  Recorte dos últimos {calculadoPorHorizonte.totalAvaliados}{' '}
+                  {calculadoPorHorizonte.totalAvaliados === 1 ? 'mês avaliado' : 'meses avaliados'},
+                  previstos com o mesmo mês de 12 meses antes.
                 </p>
                 <div className="max-h-72 overflow-y-auto">
                   <table className="w-full text-left text-sm">
@@ -259,7 +352,7 @@ export default function ForecastSection() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-teal-950/10">
-                      {dados.backtesting.comparacoes.map((comp) => (
+                      {calculadoPorHorizonte.comparacoes.map((comp) => (
                         <tr key={`${comp.ano}-${comp.mes}`}>
                           <td className="py-2 pr-4 font-medium text-teal-950">
                             {formatarMesAno(comp.mes, comp.ano)}
@@ -310,10 +403,21 @@ export default function ForecastSection() {
                     Média (MAE)
                   </p>
                   <p className="mt-1 text-xs leading-relaxed text-teal-950">
-                    Média dos erros absolutos de todos os meses avaliados no card superior.
+                    Média dos erros absolutos no horizonte selecionado ({horizonteMeses}{' '}
+                    {horizonteMeses === 1 ? 'mês' : 'meses'}).
                   </p>
                 </div>
               </div>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-teal-950/15 bg-white p-4 text-sm text-teal-800">
+              <p className="font-semibold text-teal-950">
+                Avaliação temporal (Backtesting) não disponível para o recorte atual
+              </p>
+              <p className="mt-1 text-xs leading-relaxed text-teal-700">
+                {calculadoPorHorizonte.observacaoBacktesting ??
+                  'São necessários pelo menos dois anos completos na série observada para comparar realizado e estimado mês a mês.'}
+              </p>
             </div>
           )}
         </>
