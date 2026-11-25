@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🏙️ Smart Cities 
+# 🏙️ Smart Cities
 
 ### Transformando dados urbanos em decisões mais inteligentes
 
@@ -147,7 +147,7 @@ npm start
 | 2 | `Rafael Pereira Grigorio de Lacerda` | `1272526033` |
 | 3 | `Fausto Bento Torres` | `1272521583 ` |
 | 4 | `José Felipe Amorim Gerez` | `12725158186` |
-| 5 | `[Nome completo]` | `[RA]` |
+| 5 | `Yuri Cruz Torquato` | `12724219602` |
 
 ## 🎓 Contexto acadêmico e entregas
 
