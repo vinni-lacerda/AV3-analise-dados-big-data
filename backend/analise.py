@@ -532,7 +532,7 @@ if __name__ == "__main__":
         if len(sys.argv) > 1
         else raiz_projeto / "dados" / "turismo.db"
     )
-    caminho_saida_json = raiz_projeto / "docs" / "indicadores_turismo_2025_v2.json"
+    caminho_saida_json = raiz_projeto / "docs" / "indicadores_turismo_2025.json"
 
     relatorio = gerar_relatorio_completo(caminho_db_padrao)
     caminho_saida_json.parent.mkdir(parents=True, exist_ok=True)

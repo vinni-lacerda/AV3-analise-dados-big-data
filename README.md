@@ -110,15 +110,51 @@ O projeto React está em `frontend/` e utiliza Next.js:
 ```text
 .
 ├── README.md
-├── frontend/
+├── backend/              # Pipeline ETL (Polars/SQLAlchemy) e scripts de análise
+│   ├── etl.py
+│   ├── analise.py
+│   ├── pyproject.toml
+│   └── uv.lock
+├── dados/                # Schema SQLite (CSV bruto e turismo.db ficam ignorados no Git)
+│   └── schema.sql
+├── frontend/             # Aplicação React / Next.js
 │   ├── app/              # Rotas e layout da aplicação Next.js
 │   ├── src/              # Componentes, dados e estilos
 │   ├── package.json
 │   └── package-lock.json
-├── docs/                 # Documento técnico, arquitetura e LGPD
+├── docs/                 # Relatório de indicadores JSON, arquitetura e LGPD
 ├── diagrams/             # Fluxogramas e diagramas conceituais
 └── presentation/         # Material da apresentação
 ```
+### ⚙️ Como executar o ETL e a análise de dados (Backend)
+
+1. **Baixar a base oficial:** acesse o [Portal de Dados Abertos do Ministério do Turismo](https://dados.turismo.gov.br/dataset/empregos-formais-no-turismo/resource/5bf8cead-e5e6-4391-8d37-c16f61a4ca90) e baixe o arquivo CSV da RAIS Turismo 2025 (`RAIS_Turismo_2025.csv`).
+
+2. **Posicionar o arquivo:** salve o arquivo baixado dentro da pasta `dados/` na raiz do projeto com o nome `dados/RAIS_Turismo_2025.csv` (ou informe o caminho completo como argumento ao rodar o script).
+
+3. **Instalar as dependências com `uv`:**
+
+   ```bash
+   cd backend
+   uv sync
+   ```
+
+4. **Executar o pipeline ETL (gera o banco `dados/turismo.db`):**
+
+   ```bash
+   uv run python etl.py
+   # Ou passando um caminho customizado para o CSV:
+   # uv run python etl.py "C:/caminho/para/RAIS_Turismo_2025.csv"
+   ```
+
+5. **Executar a análise exploratória (gera o relatório `docs/indicadores_turismo_2025.json`):**
+
+   ```bash
+   uv run python analise.py
+   ```
+
+- **Banco SQLite gerado:** `dados/turismo.db` (ignorado no versionamento via `.gitignore`).
+- **Relatório JSON gerado:** `docs/indicadores_turismo_2025.json` (contém a validação de integridade e os resultados das 8 perguntas do MVP).
 
 ### ▶️ Como executar o frontend
 

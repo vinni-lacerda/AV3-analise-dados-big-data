@@ -107,7 +107,6 @@ def calcular_sha256(caminho_arquivo: Path) -> str:
 
 
 def limpar_texto_py(valor: str | None) -> str | None:
-    """Versão escalar (usada só nas respostas da API do IBGE)."""
     if valor is None:
         return None
     texto = " ".join(valor.strip().split())
@@ -115,13 +114,17 @@ def limpar_texto_py(valor: str | None) -> str | None:
 
 
 def expr_limpar_texto(coluna: str) -> pl.Expr:
-    """strip + colapsa espaços internos + string vazia vira NULL."""
     texto = pl.col(coluna).cast(pl.Utf8).str.strip_chars().str.replace_all(r"\s+", " ")
     return pl.when(texto.str.len_chars() > 0).then(texto).otherwise(None).alias(coluna)
 
 
+def expr_inteiro_estrito(coluna: str) -> pl.Expr:
+    texto = pl.col(coluna)
+    eh_inteiro = texto.str.contains(r"^\d+$")
+    return pl.when(eh_inteiro).then(texto.cast(pl.Int64, strict=False))
+
+
 def expr_float_finito(coluna: str, virgula_decimal: bool = True) -> pl.Expr:
-    """str -> float (aceitando vírgula decimal); inválido/NaN/inf vira NULL."""
     texto = pl.col(coluna)
     if virgula_decimal:
         texto = texto.str.replace_all(",", ".")
@@ -149,7 +152,6 @@ def consultar_catalogo_ibge(endpoint: str, codigo: str) -> str | None:
 def montar_catalogo(
     endpoint: str, codigos: list[str], max_workers: int = 8
 ) -> dict[str, str | None]:
-    """Consulta cada código único uma única vez (equivale ao cache do original)."""
     codigos_unicos = list(dict.fromkeys(codigos))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         nomes = pool.map(lambda c: consultar_catalogo_ibge(endpoint, c), codigos_unicos)
@@ -159,7 +161,8 @@ def montar_catalogo(
 def detectar_encoding(caminho_csv: Path) -> str:
     try:
         with caminho_csv.open("r", encoding="utf-8-sig") as teste:
-            teste.read(4096)
+            while teste.read(65536):
+                pass
         return "utf-8-sig"
     except UnicodeDecodeError:
         return "latin-1"
@@ -175,12 +178,6 @@ def detectar_delimitador(caminho_csv: Path, encoding: str) -> str:
 def abrir_csv_lazy(
     caminho_csv: Path, encoding: str, delimitador: str
 ) -> Iterator[pl.LazyFrame]:
-    """
-    Devolve um LazyFrame com todas as colunas como texto (igual ao csv.DictReader).
-
-    O polars só lê UTF-8. Se o arquivo for latin-1, ele é transcodificado em blocos de 1 MB
-    para um arquivo temporário (memória constante) que é apagado ao final.
-    """
     pasta_tmp: str | None = None
     fonte = caminho_csv
     try:
@@ -196,22 +193,27 @@ def abrir_csv_lazy(
         lf = pl.scan_csv(
             fonte,
             separator=delimitador,
-            infer_schema=False,  # tudo como texto
+            infer_schema=False,
             truncate_ragged_lines=True,
         )
 
-        # BOM no nome da primeira coluna (utf-8-sig)
         nomes = lf.collect_schema().names()
         sem_bom = {n: n.lstrip("\ufeff") for n in nomes if n.startswith("\ufeff")}
         if sem_bom:
             lf = lf.rename(sem_bom)
             nomes = lf.collect_schema().names()
 
-        # Colunas ausentes se comportam como linha.get(...) -> None
-        faltantes = [c for c in COLUNAS_ORIGEM if c not in nomes]
-        if faltantes:
+        obrigatorias_faltantes = [c for c in COLUNAS_OBRIGATORIAS if c not in nomes]
+        if obrigatorias_faltantes:
+            lista = ", ".join(obrigatorias_faltantes)
+            raise ValueError(
+                f"CSV inválido: colunas obrigatórias ausentes: {lista}"
+            )
+
+        opcionais_faltantes = [c for c in COLUNAS_ORIGEM if c not in nomes]
+        if opcionais_faltantes:
             lf = lf.with_columns(
-                [pl.lit(None, dtype=pl.Utf8).alias(c) for c in faltantes]
+                [pl.lit(None, dtype=pl.Utf8).alias(c) for c in opcionais_faltantes]
             )
 
         yield lf.select(COLUNAS_ORIGEM)
@@ -221,7 +223,7 @@ def abrir_csv_lazy(
 
 
 def transformar(lf: pl.LazyFrame) -> tuple[pl.DataFrame, int, dict[str, int]]:
-    # linha_origem: posição 1-based da linha de dados no CSV (antes de qualquer descarte)
+    ano_int = expr_inteiro_estrito("Ano")
     base = (
         lf.with_row_index("linha_origem", offset=1)
         .with_columns(pl.col("linha_origem").cast(pl.Int64))
@@ -230,14 +232,12 @@ def transformar(lf: pl.LazyFrame) -> tuple[pl.DataFrame, int, dict[str, int]]:
             pl.all_horizontal(pl.col(COLUNAS_OBRIGATORIAS).is_not_null()).alias(
                 "_ok_obrigatorios"
             ),
-            # int(float(ano_raw)) — sem troca de vírgula, como no original
-            expr_float_finito("Ano", virgula_decimal=False)
-            .cast(pl.Int64, strict=False)
+            pl.when(ano_int.is_between(2000, 2100))
+            .then(ano_int)
             .alias("ano_referencia"),
         )
     )
 
-    # Passo 1 (streaming, memória mínima): contagens de lidos e dos dois primeiros descartes
     lidos, sem_obrigatorios, ano_invalido = (
         base.select(
             pl.len().alias("lidos"),
@@ -251,8 +251,7 @@ def transformar(lf: pl.LazyFrame) -> tuple[pl.DataFrame, int, dict[str, int]]:
     )
     validos_antes_dedup = lidos - sem_obrigatorios - ano_invalido
 
-    # Passo 2 (streaming): filtros, conversões e deduplicação (mantém a 1ª ocorrência)
-    mes = expr_float_finito("Mes_Admissao").cast(pl.Int64, strict=False)
+    mes = expr_inteiro_estrito("Mes_Admissao")
     reais = expr_float_finito("Remuneracao_Dezembro")
     limpo = (
         base.filter(pl.col("_ok_obrigatorios") & pl.col("ano_referencia").is_not_null())
@@ -262,13 +261,11 @@ def transformar(lf: pl.LazyFrame) -> tuple[pl.DataFrame, int, dict[str, int]]:
             .then(
                 (reais * 100).round(0, mode="half_to_even").cast(pl.Int64, strict=False)
             )
-            .alias("remuneracao_dezembro_centavos"),  # half_to_even = round() do Python
+            .alias("remuneracao_dezembro_centavos"),
         )
         .rename(RENOMEAR)
         .unique(subset=CHAVE_DEDUP, keep="first", maintain_order=True)
-        .select(
-            COLUNAS_FINAIS
-        )  # descarta Id e colunas auxiliares antes de materializar
+        .select(COLUNAS_FINAIS)
         .collect(engine="streaming")
     )
 
@@ -328,9 +325,7 @@ def criar_engine(caminho_db: Path) -> Engine:
     engine = create_engine(f"sqlite:///{caminho_db}")
 
     @event.listens_for(engine, "connect")
-    def _ativar_fk(
-        dbapi_conexao, _registro
-    ):  # PRAGMA foreign_keys = ON em toda conexão
+    def _ativar_fk(dbapi_conexao, _registro):
         cursor = dbapi_conexao.cursor()
         cursor.execute("PRAGMA foreign_keys = ON;")
         cursor.close()
@@ -350,7 +345,6 @@ def inicializar_banco(engine: Engine, caminho_schema: Path) -> None:
 
 
 def inserir_em_lotes(conexao: Connection, comando, df: pl.DataFrame) -> None:
-    """Converte para dict apenas uma fatia por vez, para não duplicar o DataFrame em memória."""
     if df.is_empty():
         return
     for fatia in df.iter_slices(n_rows=TAMANHO_LOTE):
@@ -413,7 +407,6 @@ def executar_etl(caminho_csv: Path, caminho_db: Path, caminho_schema: Path) -> N
         aceitos = empregos.height
 
         print(f"Gravando {aceitos} registros no SQLite...")
-        # Transação única: se algo falhar, nada é gravado (igual ao `with conexao:` original)
         with engine.begin() as conexao:
             arquivo_id = conexao.execute(
                 t_arquivos.insert().values(
