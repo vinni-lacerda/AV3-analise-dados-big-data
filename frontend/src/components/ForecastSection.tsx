@@ -76,7 +76,6 @@ function construirFallbackLocal(): PrevisaoData {
     ...PESOS_2024.map((v, idx) => ({ ano: 2024, mes: idx + 1, total_admissoes: v })),
     ...PESOS_2025.map((v, idx) => ({ ano: 2025, mes: idx + 1, total_admissoes: v })),
   ];
-
   const comparacoes: ComparacaoItem[] = PESOS_2025.map((real, idx) => {
     const previsto = PESOS_2024[idx];
     return {
