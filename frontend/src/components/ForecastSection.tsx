@@ -11,7 +11,7 @@ interface SerieItem {
 interface PrevisaoItem {
   ano: number;
   mes: number;
-  previsto: number;
+  previsto: number | null;
   referencia: string;
 }
 
@@ -173,7 +173,7 @@ export default function ForecastSection() {
     for (let passo = 1; passo <= horizonteMeses; passo++) {
       const alvo = avancarMesAno(ultimoPonto.ano, ultimoPonto.mes, passo);
       const ref = avancarMesAno(alvo.ano, alvo.mes, -12);
-      const valorRef = mapaSerie.get(`${ref.ano}-${ref.mes}`) ?? 0;
+      const valorRef = mapaSerie.get(`${ref.ano}-${ref.mes}`) ?? null;
 
       previsoesDinamicas.push({
         ano: alvo.ano,
@@ -290,7 +290,7 @@ export default function ForecastSection() {
                 <p className="mt-1 text-sm font-semibold text-teal-950">
                   Indisponível{' '}
                   <span className="block text-xs font-normal text-teal-700">
-                    Requer ano anterior na série
+                    Requer histórico comparável
                   </span>
                 </p>
               )}
@@ -320,7 +320,7 @@ export default function ForecastSection() {
                         </td>
                         <td className="py-2 pr-4 text-teal-700">{item.referencia}</td>
                         <td className="py-2 text-right font-semibold text-teal-950">
-                          {item.previsto.toLocaleString('pt-BR')}
+                          {item.previsto?.toLocaleString('pt-BR') ?? 'Sem histórico'}
                         </td>
                       </tr>
                     ))}
@@ -431,7 +431,7 @@ export default function ForecastSection() {
               </p>
               <p className="mt-1 text-xs leading-relaxed text-teal-700">
                 {calculadoPorHorizonte.observacaoBacktesting ??
-                  'São necessários pelo menos dois anos completos na série observada para comparar realizado e estimado mês a mês.'}
+                  'A avaliação requer pelo menos 24 meses com dados e uma comparação possível com o mesmo mês do ano anterior.'}
               </p>
             </div>
           )}

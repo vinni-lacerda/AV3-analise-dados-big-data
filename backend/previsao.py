@@ -71,7 +71,7 @@ def gerar_previsao_naive_sazonal(
             ano_atual += 1
 
         ano_ref = ano_atual - 1
-        previsto = mapa_valores.get((ano_ref, mes_atual), 0)
+        previsto = mapa_valores.get((ano_ref, mes_atual))
         previsoes.append(
             {
                 "ano": ano_atual,
@@ -87,17 +87,18 @@ def gerar_previsao_naive_sazonal(
 def executar_backtesting(serie: list[dict[str, int]]) -> list[dict[str, Any]]:
     """
     Avalia o modelo naive sazonal em ordem estritamente temporal:
-    para cada mês a partir do 13º, usa apenas a observação de 12 meses antes.
+    compara apenas meses que têm uma observação no mesmo mês do ano anterior.
     """
     if len(serie) < 24:
         return []
 
+    mapa_valores = {(item["ano"], item["mes"]): item["total_admissoes"] for item in serie}
     comparacoes: list[dict[str, Any]] = []
-    for indice in range(12, len(serie)):
-        atual = serie[indice]
-        anterior = serie[indice - 12]
-        real = int(atual["total_admissoes"])
-        previsto = int(anterior["total_admissoes"])
+    for atual in serie:
+        previsto = mapa_valores.get((atual["ano"] - 1, atual["mes"]))
+        if previsto is None:
+            continue
+        real = atual["total_admissoes"]
         comparacoes.append(
             {
                 "ano": atual["ano"],
@@ -160,8 +161,8 @@ def montar_resultado_previsao(
         None
         if comparacoes
         else (
-            f"A base contém apenas o ano de {anos[0]} ({len(serie)} meses). "
-            "A projeção sazonal é calculada normalmente, mas o backtesting exige um ano anterior para comparação."
+            "A avaliação requer pelo menos 24 meses com dados e uma comparação possível "
+            "com o mesmo mês do ano anterior."
         )
     )
 
