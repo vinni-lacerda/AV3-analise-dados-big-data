@@ -3,7 +3,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-
+from previsao import analisar_previsao_sazonal
 import polars as pl
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Connection
@@ -518,6 +518,7 @@ def gerar_relatorio_completo(caminho_db: Path) -> dict:
             "p6_cidades_por_cnae": p6_cidades_por_cnae(conexao),
             "p7_participacao_mulheres": p7_participacao_mulheres(conexao),
             "p8_escolaridade_mais_comum": p8_escolaridade_mais_comum(conexao),
+            "p9_previsao_sazonal": analisar_previsao_sazonal(conexao),
         }
     finally:
         engine = conexao.engine
@@ -533,11 +534,25 @@ if __name__ == "__main__":
         else raiz_projeto / "dados" / "turismo.db"
     )
     caminho_saida_json = raiz_projeto / "docs" / "indicadores_turismo_2025.json"
+    caminho_frontend = raiz_projeto / "frontend" / "public" / "previsao_sazonal.json"
+    caminho_frontend.parent.mkdir(parents=True, exist_ok=True)
+
+    if not caminho_db_padrao.exists():
+        print(
+            f"Erro: banco SQLite não encontrado em '{caminho_db_padrao}'. "
+            "Relatório não gerado.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     relatorio = gerar_relatorio_completo(caminho_db_padrao)
     caminho_saida_json.parent.mkdir(parents=True, exist_ok=True)
     caminho_saida_json.write_text(
         json.dumps(relatorio, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    caminho_frontend.write_text(
+        json.dumps(relatorio["p9_previsao_sazonal"], ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
     print("=== VALIDAÇÃO DE TOTAIS ===")
