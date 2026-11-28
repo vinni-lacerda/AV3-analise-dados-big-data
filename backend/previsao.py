@@ -4,21 +4,7 @@ from typing import Any
 
 
 def obter_serie_mensal(conexao: Any) -> list[dict[str, int]]:
-    """Extrai a série mensal de admissões a partir de empregos_turismo."""
-    anos_rows = conexao.exec_driver_sql(
-        """
-        SELECT DISTINCT ano_referencia AS ano
-        FROM empregos_turismo
-        WHERE ano_referencia IS NOT NULL
-        ORDER BY ano_referencia ASC
-        """
-    ).fetchall()
-
-    if not anos_rows:
-        return []
-
-    anos = [int(row[0]) for row in anos_rows]
-
+    """Extrai apenas os meses cobertos pela série mensal de admissões a partir de empregos_turismo."""
     contagens_rows = conexao.exec_driver_sql(
         """
         SELECT
@@ -26,29 +12,24 @@ def obter_serie_mensal(conexao: Any) -> list[dict[str, int]]:
             mes_admissao AS mes,
             COUNT(*) AS total_admissoes
         FROM empregos_turismo
-        WHERE mes_admissao BETWEEN 1 AND 12
+        WHERE ano_referencia IS NOT NULL
+          AND mes_admissao BETWEEN 1 AND 12
         GROUP BY ano_referencia, mes_admissao
         ORDER BY ano_referencia ASC, mes_admissao ASC
         """
     ).fetchall()
 
-    mapa_contagens: dict[tuple[int, int], int] = {
-        (int(row[0]), int(row[1])): int(row[2])
+    if not contagens_rows:
+        return []
+
+    return [
+        {
+            "ano": int(row[0]),
+            "mes": int(row[1]),
+            "total_admissoes": int(row[2]),
+        }
         for row in contagens_rows
-    }
-
-    serie: list[dict[str, int]] = []
-    for ano in anos:
-        for mes in range(1, 13):
-            serie.append(
-                {
-                    "ano": ano,
-                    "mes": mes,
-                    "total_admissoes": mapa_contagens.get((ano, mes), 0),
-                }
-            )
-
-    return serie
+    ]
 
 
 def gerar_serie_mock_fallback() -> list[dict[str, int]]:

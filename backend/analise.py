@@ -533,17 +533,17 @@ if __name__ == "__main__":
         if len(sys.argv) > 1
         else raiz_projeto / "dados" / "turismo.db"
     )
-    caminho_saida_json = raiz_projeto / "docs" / "indicadores_turismo_2025_v2.json"
+    caminho_saida_json = raiz_projeto / "docs" / "indicadores_turismo_2025.json"
     caminho_frontend = raiz_projeto / "frontend" / "public" / "previsao_sazonal.json"
     caminho_frontend.parent.mkdir(parents=True, exist_ok=True)
 
     if not caminho_db_padrao.exists():
-        caminho_frontend.write_text(
-            json.dumps(analisar_previsao_sazonal(None), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        print(
+            f"Erro: banco SQLite não encontrado em '{caminho_db_padrao}'. "
+            "Relatório não gerado.",
+            file=sys.stderr,
         )
-        print(f"Banco não encontrado; fallback mock salvo em: {caminho_frontend}")
-        sys.exit(0)
+        sys.exit(1)
 
     relatorio = gerar_relatorio_completo(caminho_db_padrao)
     caminho_saida_json.parent.mkdir(parents=True, exist_ok=True)

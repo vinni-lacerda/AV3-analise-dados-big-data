@@ -76,6 +76,7 @@ function construirFallbackLocal(): PrevisaoData {
     ...PESOS_2024.map((v, idx) => ({ ano: 2024, mes: idx + 1, total_admissoes: v })),
     ...PESOS_2025.map((v, idx) => ({ ano: 2025, mes: idx + 1, total_admissoes: v })),
   ];
+
   const comparacoes: ComparacaoItem[] = PESOS_2025.map((real, idx) => {
     const previsto = PESOS_2024[idx];
     return {
@@ -332,14 +333,29 @@ export default function ForecastSection() {
           {calculadoPorHorizonte.temBacktesting ? (
             <div className="space-y-4">
               <div className="rounded-lg border border-teal-950/15 bg-white p-4">
-                <h3 className="mb-1 text-base font-semibold text-teal-950">
-                  Avaliação temporal (Backtesting — Observado vs. Estimado)
-                </h3>
-                <p className="mb-3 text-xs text-teal-700">
-                  Recorte dos últimos {calculadoPorHorizonte.totalAvaliados}{' '}
-                  {calculadoPorHorizonte.totalAvaliados === 1 ? 'mês avaliado' : 'meses avaliados'},
-                  previstos com o mesmo mês de 12 meses antes.
-                </p>
+                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="mb-1 text-base font-semibold text-teal-950">
+                      Avaliação temporal (Backtesting — Observado vs. Estimado)
+                    </h3>
+                    <p className="text-xs text-teal-700">
+                      Recorte dos últimos {calculadoPorHorizonte.totalAvaliados}{' '}
+                      {calculadoPorHorizonte.totalAvaliados === 1 ? 'mês avaliado' : 'meses avaliados'},
+                      previstos com o mesmo mês de 12 meses antes.
+                    </p>
+                  </div>
+
+                  {dados.origem_dados === 'mock_fallback' && (
+                    <div
+                      role="status"
+                      className="max-w-sm rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950"
+                    >
+                      <span className="font-semibold">Valores simulados:</span> sem arquivo de
+                      previsão preenchido; os números em &ldquo;Realizado&rdquo; são exemplos
+                      simulados.
+                    </div>
+                  )}
+                </div>
                 <div className="max-h-72 overflow-y-auto">
                   <table className="w-full text-left text-sm">
                     <thead>
